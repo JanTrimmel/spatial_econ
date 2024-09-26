@@ -1,0 +1,1210 @@
+---
+title: "Spatial Economics -- Assignment 2"
+author:
+  - "Gustav Pirich (h11910449)"
+  - "Peter Prilleshi (h11776041)"
+  - "Filip Lukijanovic (h11776896)"
+date: "April 2, 2024"
+output:
+  pdf_document:
+    toc: true
+    includes:
+      in_header: !expr file.path("~/Desktop/GITHUB/spatial_econ/helper/wraper_code.tex")
+bibliography: references.bib
+nocite: '@*'
+header-includes:
+  - \usepackage{tcolorbox}
+  - \usepackage[default]{lato}
+  - \usepackage{rotating}
+papersize: a4
+geometry: margin=2cm
+urlcolor: DarkOrchid!65!black
+---
+
+```{r, setup, include = FALSE}
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 80), tidy = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+library(showtext)
+showtext_auto()
+
+pacman::p_load(stringi, stringr, stringdist, haven, sf, dplyr, fuzzyjoin, 
+               comparator, digest, zoomerjoin, ggplot2, tidyr, ggthemes, viridis, 
+               fixest, conleyreg, plm, stargazer, magrittr, tidyverse, tmap, spdep, 
+               igraph, generics, knitr, kableExtra, formatR)
+```
+
+\vspace{2em}
+
+\begin{tcolorbox}
+\centering \itshape The code that was used in compiling the assignment is available on GitHub at \url{https://github.com/gustavpirich/spatial_econ/blob/main/02_assignment/02_assignmnet.Rmd}.
+\end{tcolorbox}
+
+\newpage
+
+# Exercise A
+
+```{r, echo = FALSE}
+#reading in spatial dimension of productivity growth
+load("~/Desktop/GITHUB/spatial_econ/data/02_assignmnet/export/data1.rda")
+
+#reading in Shapefile of EU-27
+EU27 <- read_sf("~/Desktop/GITHUB/spatial_econ/data/02_assignmnet/export/EU27.shp")
+
+# we can also exclude all oversea territories
+overseas <- c("FRY1", "FRY2", "FRY3", "FRY4", "FRY5", "FRZZ", 
+              "PT20", "PT30", "PTZZ", 
+              "ES70", "ESZZ", 
+              "NO0B", "NOZZ")
+
+east_germany_nuts2 <- c("DE40", "DE80", "DED3", "DED2", "DED1","DE42", "DE41", "DE30", "DED5", "DEE0", "DEG0", "DEE3", "DEE2", "DEE1")
+
+EU27 <- EU27[! EU27$Id %in% overseas, ]
+  
+data1 <- data1[! data1$IDb %in% overseas, ]
+
+data_1 <- data1 %>%
+  filter(substr(IDb, 1, 2) %in% c("AT", "DE", "IT", "PT", "FR", "ES")) %>%
+  select(IDb, pr80b, pr103b, lninv1b, lndens.empb) %>%
+  rename("Id" = "IDb") %>%
+  filter(!Id %in% east_germany_nuts2)
+
+data_1$prod_growth <- 100*((data_1$pr103b - data_1$pr80b) / data_1$pr80b)
+
+EU27 <- EU27 %>%
+  filter(substr(Id, 1, 2) %in% c("AT", "DE", "IT", "PT", "FR", "ES")) %>%
+  filter(!Id %in% east_germany_nuts2) %>%
+  left_join(data_1, by = c("Id"))
+
+```
+## Growth Rate of Productivity form 1980 to 2013 
+
+The map shows the productivity growth rates in NUTS-2 regions for the selected countries. We can see that many regions especially in West Germany, Austria, and France exhibited negative productivity growth over the selected period. Notably, Portugal's productivity has been growing the fastest. We suspect that the negative growth rates can be explained by the fact that high-income countries had a high baseline productivity to begin with, while Portugal started from a rather low baseline productivity. One might interpret this as productivity convergence across Europe.
+
+```{r,echo = FALSE}
+tm_shape(EU27) +
+  tm_polygons("prod_growth", 
+              title = "Productivity Growth in %",
+              style = "cont", 
+              lwd = 2, 
+              midpoint =10) +
+  tm_legend(position = c("left", "bottom"), legend.outside = TRUE) +
+  tm_layout(frame = TRUE, bg.color = "lightblue") 
+```
+
+## Spatial Weight Matrices
+
+
+### (i) Distance Threshold 
+First, we create a spatial weights matrix based on a distance threshold. Any region is being assigned a '1' with respect to another region, if it is less than 3 km away. We have chosen this threshold so that every region has a neighbor. We use the nb2mat function from the 'spdep' package. We row-normalize the matrix.
+
+```{r}
+coords <- st_coordinates(st_centroid(EU27))
+
+#checking the maximum distance as to include all observations which have a matrix   
+nb1 <- knn2nb(knearneigh(coords, k = 1))
+
+dist1 <- nbdists(nb1, coords)
+
+distw <- dnearneigh(coords, 0, 3)
+
+#creating matrix based on distance threshold up to 3 kilometers
+dist_w_matrix <- nb2mat(distw, style="W", zero.policy=TRUE)
+```
+
+
+### (ii) Smooth-Distance Decay 
+Next, we create a spatial weights matrix based on a smooth distance-decay. We use the following simple distance decay function $w_{i, j} = 1/d_{i,j}^{\lambda}$, where d denotes the distance between region i and j, and $\lambda$ is the distance decay parameter. We set $\lambda = 1$. We calculate the weights for each neighboring region based on at least k=20 nearest neighbors. We do \emph{not} row-normalize the matrix.
+
+```{r}
+k1 <- knearneigh(coords, k=20)
+k2 <- knn2nb(k1)
+
+dists <- nbdists(k2, coords)
+
+ids <- lapply(dists, function(d){1/d})
+
+decay_weights_matrix_list <- nb2listw(k2, glist = ids, style = "B", zero.policy = TRUE)
+
+decay_weights_matrix <- listw2mat(decay_weights_matrix_list)
+```
+
+### (iii) Contiguity-based measure
+Finally, we calculate a contiguity based measure, which we row normalize as well.
+```{r}
+# Create a contiguity-based spatial weights matrix
+queen_weights <- poly2nb(EU27, queen = TRUE)
+
+contig_w_matrix <- nb2mat(queen_weights, style="W", zero.policy=TRUE)
+```
+
+## Matrix Comparison
+
+We can gain deeper insights into these spatial weights matrices as well as the networks they represent by comparing key measures of the graphs that are derived from them. To that end, we create a function which computes key summary statistics. Note that interpretation of the obtained summary statistics might be somewhat impaired by the fact that the matrices are row-normalized as compared to the smooth distance decay matrix.  
+
+```{r}
+graph_dist <- graph_from_adjacency_matrix(dist_w_matrix, mode = "undirected", weighted = TRUE)
+graph_decay <- graph_from_adjacency_matrix((decay_weights_matrix), mode = "undirected", weighted = TRUE)
+graph_contig <- graph_from_adjacency_matrix(contig_w_matrix, mode = "undirected", weighted = TRUE)
+
+# Function to summarize graph properties and return as a data frame
+summarize_graph <- function(g) {
+  # Function to format the number based on its value
+  format_number <- function(x) {
+    if (floor(x) == x) {  # If the number is an integer
+      return(as.character(x))  # Return without decimal places
+    } else {
+      return(format(x, nsmall = 2))  # Return with two decimal places
+    }
+  }
+  
+  # Apply the format_number function to each relevant graph property
+  graph_summary <- data.frame(
+    Property = c("Number of vertices", "Number of edges", "Average path length", 
+                 "Graph density", "Average degree", "Max Eigenvector Centrality", 
+                 "Min Eigenvector Centrality", "Average Eigenvector Centrality", 
+                 "Most Central Unit (Vertex ID)"),
+    Value = sapply(c(vcount(g), ecount(g), 
+              average.path.length(g, directed = FALSE), 
+              edge_density(g), 
+              mean(degree(g)),
+              max(eigen_centrality(g)$vector),
+              min(eigen_centrality(g)$vector),
+              mean(eigen_centrality(g)$vector),
+              as.numeric(V(g)[which.max(eigen_centrality(g)$vector)])), format_number)
+  )
+  
+  return(graph_summary)
+}
+```
+
+```{r,echo = FALSE}
+
+# Analyze graph properties
+kable(summarize_graph(graph_dist), caption = "Summary of Distance Threshold Graph") %>%
+  kable_styling(latex_options = c("hold_position"))
+kable(summarize_graph(graph_decay), caption = "Summary of Smooth Distance-Decay Matrix") %>%
+  kable_styling(latex_options = c("hold_position"))
+kable(summarize_graph(graph_contig), caption = "Summary of Contiguity-Based Graph") %>%
+  kable_styling(latex_options = c("hold_position"))
+    
+```
+
+**Number of edges**
+
+The Smooth Distance-Decay Graph has the highest number of edges (1266). The Distance Threshold Graph has fewer edges (514). The Contiguity-Based Graph has the fewest edges (222), since only directly contiguous or neighboring entities are connected, leading to a more sparse graph structure. However, note that this measure does not capture the strength of the ties.  
+
+**Average path length**
+
+The Contiguity-Based Graph has the highest average path length (1.2888), reflecting the sparse connectivity where nodes are less directly connected. The Distance Threshold Graph has a medium average path length (0.6751). The Smooth Distance-Decay Graph has the lowest average path length (0.4933), indicative of a denser network where nodes are more directly accessible to one another.
+
+**Graph density**
+
+Consistent with the number of edges, the Smooth Distance-Decay Graph is the densest (0.2410), followed by the Distance Threshold Graph (0.0978), with the Contiguity-Based Graph being the least dense (0.0423). However, for the distance decay spatial weights matrix the traditional density calculation might not fully capture the true nature of connectivity because they do not account for the effect of distance on interaction strength.
+
+**Average degree**
+
+Again, the Smooth Distance-Decay Graph shows the highest average degree (24.5825), the Distance Threshold Graph shows a medium degree (9.9806), and the Contiguity-Based Graph has the lowest (4.3107).
+
+**Minimum Eigenvector Centrality**
+
+The Contiguity-Based Graph shows the most significant variation in centrality (minimum near zero), reflecting a few very poorly connected nodes, or nodes that only connect to other low-influence nodes. The Smooth Distance-Decay Graph and the Distance Threshold Graph have higher minimum values, whcih might hint at a more uniform distribution of node influence.
+
+**Average Eigenvector Centrality**
+
+Higher in the Smooth Distance-Decay Graph (0.2837), suggesting that, on average, nodes are better positioned or more influential within the network. It's lowest in the Contiguity-Based Graph (0.0898), consistent with its sparse and uneven connectivity.
+
+Looking at the most central unit through eigenvector centrality shows that different nodes are identified as most central in each graph. 
+```{r, echo = FALSE, fig.align = 'center', fig.width=5, fig.height=4}
+t1 <- table(degree(graph_dist))
+#sum(t1)
+relafreq_1 <- t1/sum(t1)
+barplot(relafreq_1, xlab = "k", ylab = "Relative frequencies", 
+        main = "Degree distribution Distance Threshold",
+        col = "blue")
+
+t1 <- table(degree(graph_contig))
+#sum(t1)
+relafreq_1 <- t1/sum(t1)
+barplot(relafreq_1, xlab = "k", ylab = "Relative frequencies", 
+        main = "Degree distribution Queen contiguity",
+        col = "orange")
+```
+
+We also present the degree distribution for the distance threshold graph and the queen contiguity graph. We consider the degree distribution to be of rather low informational value for the distance decay matrix, which is why we omit it. For queen contiguity the degree distribution is somewhat normally distributed around 4.5. For the distance threshold we can see that there are many regions with a high number of links.
+
+## Plot the matrix
+We now plot the three spatial weight matrices. The column and rows denote the ids of the regions. The colours denote the intensity. The row-normalized matrices range from 0-1, the distance decay matrix is not row-normalized.
+```{r, echo = FALSE, fig.align = 'center', fig.width=5, fig.height=4}
+lattice::levelplot((dist_w_matrix), main="Distance Threshold Spatial Weights Matrix",
+scales = list(x = list(at = c(20, 40, 60, 80, 100),
+                       labels = c(20, 40, 60, 80, 100))))
+
+lattice::levelplot((decay_weights_matrix), main="Smooth Distance-Decay Spatial Weights Matrix",
+scales = list(x = list(at = c(20, 40, 60, 80, 100),
+                       labels = c(20, 40, 60, 80, 100))))
+
+lattice::levelplot((contig_w_matrix), main="Contiguity-Based Spatial Weights Matrix",
+scales = list(x = list(at = c(20, 40, 60, 80, 100),
+                       labels = c(20, 40, 60, 80, 100))))
+```
+## Try to visualize the network they represent
+
+Let us first visualize the distance threshold based spatial weights matrix. The first plot shows the map of Europe and the blue lines indicate the connections. The map shows the connectivity in Europe based on a distance threshold. 
+
+The second map visualizes the network based on the distance-decay matrix. However, the edges do not display the intensity of connections, but just the connectivity to neighboring regions. 
+
+The last map displays the queen contiguity based measure. The islands in the middle sea are not being counted as neighbors. This should caution the use of this network, as it seems implausible that Siciliy for example is not connected to the mainland Italian provinces. 
+
+```{r,echo = FALSE, fig.width=9, fig.height=13, fig.align='center'}
+par(mfrow = c(3, 1), las=1)
+
+plot(EU27$geometry, border = "darkgrey", main = "Distance Threshold")
+plot(distw, coords, add=TRUE, col="blue", pch = 19, cex = 0.6)
+
+plot(EU27$geometry, border = "darkgrey", main = "Distance Decay")
+plot(decay_weights_matrix_list, coords, add=TRUE, col= "green", pch = 19, cex = 0.6)
+
+plot(EU27$geometry, border = 'darkgrey', main = "Queen Contiguity") 
+plot(queen_weights, coords, pch = 19, cex = 0.6, add = TRUE, col = "red")
+```
+
+## Compute a suitable measure of spatial autocorrelation for productivity growth using these matrices. Point out differences, if there are any. 
+
+We calculate Global Moran's I as a measure of spatial autocorrelation for all three spatial weight matrices.  All three matrices display the strong positive spatial autocorrelation between 0.62 - 0.54, which are all highly statistically significant with p-values < 0.01. Thus there is strong evidence for the presence of sizeable levels of spatial autocorrelation. This result is robust to the choice of the spatial weights matrix.  
+```{r,echo = FALSE, fig.width=4, fig.height=7, fig.align='center'}
+# Convert the matrix to a listw object
+l_dist_w_matrix <- mat2listw(dist_w_matrix, style = "W", zero.policy = TRUE)
+
+l_decay_weights_matrix <- mat2listw(decay_weights_matrix, zero.policy = TRUE, style = "B")
+
+l_contig_w_matrix <- mat2listw(contig_w_matrix, zero.policy = TRUE, style = "W")
+
+# Compute Global Moran's I
+moran_result_dist <- moran.test((EU27$prod_growth), listw = l_dist_w_matrix)
+
+moran_result_decay <- moran.test((EU27$prod_growth), listw = l_decay_weights_matrix)
+
+moran_result_contig <- moran.test((EU27$prod_growth), listw = l_contig_w_matrix)
+
+
+# Create a data frame to hold the summarized results
+moran_summary <- data.frame(
+  Test = c("Distance Threshold", "Smooth Distance-Decay", "Contiguity-Based"),
+  Moran_I = c(moran_result_dist$estimate["Moran I statistic"], 
+              moran_result_decay$estimate["Moran I statistic"], 
+              moran_result_contig$estimate["Moran I statistic"]),
+  Expectation = c(moran_result_dist$estimate["Expectation"], 
+                  moran_result_decay$estimate["Expectation"], 
+                  moran_result_contig$estimate["Expectation"]),
+  Variance = c(moran_result_dist$estimate["Variance"], 
+               moran_result_decay$estimate["Variance"], 
+               moran_result_contig$estimate["Variance"]),
+  p_value = c(format(moran_result_dist$p.value, scientific = TRUE), 
+              format(moran_result_decay$p.value, scientific = TRUE), 
+              format(moran_result_contig$p.value, scientific = TRUE))
+)
+
+# Format and print the table
+kable(moran_summary, "latex", digits = 4, booktabs = TRUE, caption = "Summary of Moran's I Test Results for Productivity Growth") %>%
+  kable_styling(latex_options = c("striped", "scale_down"), font_size = 7) %>%
+  column_spec(1, bold = TRUE, border_right = TRUE) %>%
+  column_spec(5, color = ifelse(moran_summary$p_value < 0.05, "red", "black"))
+
+```
+## Estimate a linear regression model using OLS. 
+We estimate the specified model and obtain the following output.
+\begin{table}[!htbp] \centering 
+  \caption{} 
+  \label{} 
+\begin{tabular}{@{\extracolsep{5pt}}lc} 
+\\[-1.8ex]\hline 
+\hline \\[-1.8ex] 
+ & \multicolumn{1}{c}{\textit{Dependent variable:}} \\ 
+\cline{2-2} 
+\\[-1.8ex] & prod\_growth \\ 
+\hline \\[-1.8ex] 
+ pr80b & $-$0.253$^{***}$ \\ 
+  & (0.025) \\ 
+  & \\ 
+ lninv1b & 0.032$^{***}$ \\ 
+  & (0.008) \\ 
+  & \\ 
+ lndens.empb & 0.007 \\ 
+  & (0.009) \\ 
+  & \\ 
+ Constant & 0.314$^{***}$ \\ 
+  & (0.061) \\ 
+  & \\ 
+\hline \\[-1.8ex] 
+Observations & 103 \\ 
+R$^{2}$ & 0.528 \\ 
+Adjusted R$^{2}$ & 0.514 \\ 
+Residual Std. Error & 0.080 (df = 99) \\ 
+F Statistic & 36.983$^{***}$ (df = 3; 99) \\ 
+\hline 
+\hline \\[-1.8ex] 
+\textit{Note:}  & \multicolumn{1}{r}{$^{*}$p$<$0.1; $^{**}$p$<$0.05; $^{***}$p$<$0.01} \\ 
+\end{tabular} 
+\end{table} 
+
+## Investigating Spatial Autocorrelation in the Residuals 
+
+We observe strong evidence for spatial autocorrelation. This holds for all spatial weights matrices used. The spatial weighting schemes unanimously highlight very similar patterns and often mark the same regions. Moran's I test for spatial autocorrelation in the residuals is highly statistically significant. The Lagrange Multiplier test corroborates the results (We conduct the test only for the row-normalized spatial weights matrices). Thus, we have strong evidence that there is spatial autocorrelation in the residuals.
+The neglect of the autocorrelation will leave the OLS coefficients unbiased, however it renders the standard errors less efficient. (Similar to serial autocorrelation)
+
+
+```{r,echo = FALSE, fig.width=5.5, fig.height=9, fig.align='center'}
+sm <- lm(prod_growth ~ pr80b + lninv1b + lndens.empb, EU27)
+
+# Compute Moran's I for the model residuals using different weight matrices
+moran_result_dist <- lm.morantest(sm, l_dist_w_matrix)
+moran_result_decay <- lm.morantest(sm, l_decay_weights_matrix)
+moran_result_contig <- lm.morantest(sm, l_contig_w_matrix)
+
+# Create a data frame to hold the summarized results
+moran_summary <- data.frame(
+  Test = c("Distance Threshold", "Smooth Distance-Decay", "Contiguity-Based"),
+  Moran_I = c(moran_result_dist$estimate["Observed Moran I"], 
+              moran_result_decay$estimate["Observed Moran I"], 
+              moran_result_contig$estimate["Observed Moran I"]),
+  Expectation = c(moran_result_dist$estimate["Expectation"], 
+                  moran_result_decay$estimate["Expectation"], 
+                  moran_result_contig$estimate["Expectation"]),
+  Variance = c(moran_result_dist$estimate["Variance"], 
+               moran_result_decay$estimate["Variance"], 
+               moran_result_contig$estimate["Variance"]),
+  p_value = c(format(moran_result_dist$p.value, scientific = TRUE), 
+              format(moran_result_decay$p.value, scientific = TRUE), 
+              format(moran_result_contig$p.value, scientific = TRUE))
+)
+
+# Format and print the table using kable
+kable(moran_summary, format = "latex", digits = 4, booktabs = TRUE, caption = "Summary of Moran's I Test Results for Model Residuals") %>%
+  kable_styling(latex_options = c("striped", "scale_down"), font_size = 7) %>%
+  column_spec(1, bold = TRUE, border_right = TRUE) %>%
+  column_spec(5, color = ifelse(as.numeric(moran_summary$p_value) < 0.05, "red", "black"))
+
+# Set layout to 2x2 and adjust margins and label orientation
+par(mfrow = c(3, 1), las=1)
+#stargazer::stargazer(sm, type = "latex")
+moran.plot(sm$residuals, l_dist_w_matrix, xlab = "Residuals", ylab = "Spatially Lagged Residuals", main = "Distance Threshold")
+
+moran.plot(sm$residuals, l_decay_weights_matrix, xlab = "Residuals", ylab = "Spatially Lagged Residuals", main = "Distance Decay")
+
+moran.plot(sm$residuals, l_contig_w_matrix, xlab = "Residuals", ylab = "Spatially Lagged Residuals", main = "Contiguity")
+
+# Compute robust LM tests for the model residuals using different weight matrices
+lm.RStests(sm, l_dist_w_matrix)
+lm.RStests(sm, l_contig_w_matrix)
+```
+
+# Exercise B
+
+## Creating maps
+We create a map to visualize illiteracy and terrain ruggedness. 
+```{r, echo = FALSE}
+literacy_Arg_Bra_Par <- read_dta("~/Desktop/GITHUB/spatial_econ/data/02_assignmnet/export/literacy_Arg-Bra-Par.dta", encoding = "ISO-8859-1")
+
+#downloading the respective shapefiles take care of the file paths!!!
+gadm41_PRY_0 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_PRY_shp/gadm41_PRY_0.shp")
+
+gadm41_ARG_0 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_ARG_shp/gadm41_ARG_0.shp")
+
+gadm41_BRA_0 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_BRA_shp/gadm41_BRA_0.shp")
+
+gadm41_PRY_1 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_PRY_shp/gadm41_PRY_1.shp")
+
+gadm41_ARG_1 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_ARG_shp/gadm41_ARG_1.shp")
+
+gadm41_BRA_1 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_BRA_shp/gadm41_BRA_1.shp")
+
+dat1 <- rbind(gadm41_BRA_1, gadm41_ARG_1, gadm41_PRY_1)
+
+
+gadm41_PRY_2 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_PRY_shp/gadm41_PRY_2.shp")
+
+gadm41_ARG_2 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_ARG_shp/gadm41_ARG_2.shp")
+
+gadm41_BRA_2 <- read_sf("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/boundaries/gadm41_BRA_shp/gadm41_BRA_2.shp")
+
+dat0 <- rbind(gadm41_BRA_0, gadm41_ARG_0, gadm41_PRY_0)
+
+
+gadm41_BRA_2 %<>%
+  filter(NAME_1 %in% c("Rio Grande do Sul"))
+
+gadm41_ARG_2 %<>%
+  filter(NAME_1 %in% c("Misiones", "Corrientes"))
+
+gadm41_PRY_2 %<>%
+  filter(NAME_1 %in% c("Misiones", "Itapúa"))
+
+dat2 <- rbind(gadm41_BRA_2, gadm41_ARG_2, gadm41_PRY_2)
+
+
+list_1 <- dat2 %>%
+  select(COUNTRY, geometry, NAME_1, NAME_2) %>%
+  mutate(COUNTRY = ifelse(COUNTRY == "Brazil", "BRA", COUNTRY))
+
+literacy_Arg_Bra_Par_2 <- list_1 %>%
+  left_join(literacy_Arg_Bra_Par, by = c("NAME_2" = "muni"))
+```
+
+```{r, echo = FALSE}
+#map2 = tm_shape(literacy_Arg_Bra_Par_2) +
+#  tm_fill("literacy") + 
+#  tm_borders() +
+#  tm_legend(legend.outside = TRUE, position = c("right", "bottom")) + 
+#  tm_shape(dat0) + 
+#  tm_borders(lwd = 3, col = "black") +
+#  tm_layout(frame = FALSE) + 
+#  tm_shape(coords_sf) +
+#  tm_text("country", size = 1) +
+#  tm_layout(frame = FALSE) + 
+#  tm_compass(type = "8star") +
+#  tm_shape(dat1)+
+#  tm_borders()
+
+#map2
+
+# Corrected country name and efficient use of tm_layout
+coords <- data.frame(
+  country = c("ARGENTINA", "BRAZIL", "PARAGUAY", "URUGUAY"),
+  lon = c(-58, -55, -56, -56), # Correct longitudes
+  lat = c(-29, -30, -26, -33)  # Correct latitudes
+)
+
+# Convert to an sf object
+coords_sf <- st_as_sf(coords, coords = c("lon", "lat"), crs = 4326, agr = "constant")
+
+# Updated map visualization
+map2 <- tm_shape(literacy_Arg_Bra_Par_2) +
+  tm_fill("literacy", palette = "magma") +
+  tm_borders() +
+  tm_legend(legend.outside = TRUE, position = c("right", "bottom")) + 
+  tm_shape(dat0) + 
+  tm_borders(lwd = 3.5, col = "black") +
+  tm_shape(coords_sf) +
+  tm_text("country", size = 1.2) +
+  #tm_compass(type = "8star", position = c("right", "top")) +
+  tm_layout(frame = FALSE) +
+  tm_scale_bar(position = c(0.9, 0.8)) + 
+  tm_shape(dat1) +
+  tm_borders(lty = 2)
+
+map2
+```
+
+```{r, echo = FALSE}
+
+# roads
+map3 <- tm_shape(literacy_Arg_Bra_Par_2) +
+  tm_fill("rugg", palette = "viridis", title  = "ruggedness") +
+  tm_borders() +
+  tm_legend(legend.outside = TRUE, position = c("right", "bottom")) + 
+  tm_shape(dat0) + 
+  tm_borders(lwd = 3.5, col = "black") +
+  tm_shape(coords_sf) +
+  tm_text("country", size = 1.2, col = "red") +
+  #tm_compass(type = "8star", position = c("right", "top")) +
+  tm_layout(frame = FALSE) +
+  tm_scale_bar(position = c(0.9, 0.8)) + 
+  tm_shape(dat1) +
+  tm_borders(lty = 2)
+
+map3
+```
+
+```{r, echo = FALSE, include = FALSE}
+setwd("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/PlotsCode")
+
+data <- read_dta("./Data/literacy_Arg-Bra-Par.dta", encoding="latin1")#ISO-8859-1
+
+shapefile_BRA <- st_read("./Data/gadm41_BRA_shp/gadm41_BRA_2.shp")
+#  mutate(NAME_2 = iconv("NAME_2", to = "latin1"))
+
+shapefile_ARG <- st_read("./Data/gadm41_ARG_shp/gadm41_ARG_2.shp")
+
+shapefile_PRY <- st_read("./Data/gadm41_PRY_shp/gadm41_PRY_2.shp")
+
+
+Shapefile_Area<- rbind(rbind(shapefile_ARG, shapefile_BRA),shapefile_PRY)
+
+m_PRY <- data[data$country=="Paraguay",]%>%
+  stringdist_right_join(shapefile_PRY, by = c("muni" ="NAME_2" , "state"="NAME_1"), 
+                        max_dist = 1)
+
+m_PRY[m_PRY$NAME_2=='Mayor Julio D. Otaño',1:29]<- data[data$muni=='Mayor Otaño',]
+m_PRY[m_PRY$NAME_2=='San Juan Bautista de las Misione',1:29]<- data[data$muni=='San Juan Bautista',]
+
+
+
+m_ARG <- data[data$country=="Argentina",]%>%
+  stringdist_right_join(shapefile_ARG, by = c("muni" ="NAME_2" , "state"="NAME_1"), 
+                        max_dist = 1)
+
+m_BRA <- data[data$country=="BRA",]%>%
+  stringdist_right_join(shapefile_BRA, by = c("muni" ="NAME_2"), 
+                        max_dist = 1)
+m_BRA[m_BRA$NAME_1=="Rio Grande do Sul" ,]
+
+
+
+# Border Data
+
+states_BRA <- st_read("./Data/gadm41_BRA_1.json/gadm41_BRA_1.json")
+states_ARG <- st_read("./Data/gadm41_ARG_1.json/gadm41_ARG_1.json")
+states_PRY <- st_read("./Data/gadm41_PRY_1.json/gadm41_PRY_1.json")
+
+border_ARG <- st_read("./Data/gadm41_ARG_0.json")
+border_PRY <- st_read("./Data/gadm41_PRY_0.json")
+border_BRA <- st_read("./Data/gadm41_BRA_0.json")
+
+```
+
+
+## Reproducing Table 2 
+
+```{r, echo = FALSE}
+####### Data Loading ####
+
+setwd("/Users/gustavpirich/Library/Mobile Documents/com~apple~CloudDocs/Wirtschaftsuniversitaet/MASTER/summer_term_2024/spatial_economics/data/TableCode")
+
+argentina_brazil_paraguay <- read_dta("./Data/Tables/Argentina Brazil Paraguay Spatial.dta")
+argentina_literacy <- read_dta("./Data/Tables/Argentina Literacy Spatial.dta")
+brazil_literacy <- read_dta("./Data/Tables/Brazil Literacy Spatial.dta")
+paraguay_literacy <- read_dta("./Data/Tables/Paraguay Literacy Spatial.dta")
+```
+
+
+```{r, echo = FALSE}
+formula1 <- illiteracy ~ distmiss + lati + longi + corr + ita + mis + mis1 + one
+formula2 <- illiteracy ~ distmiss + lati + longi + corr + ita + mis + mis1 + one +
+  area+ tempe + alti + preci + rugg + river + coast
+
+formula3 <- illiteracy ~  cutoff1 + cutoff1 + distmiss + lati + 
+  longi + corr + ita + mis + mesorregi + one + mesorregi
+formula4 <- illiteracy ~ lati + longi  + one + distmiss +
+  area + tempe + alti + preci + rugg + river + coast + mesorregi 
+
+formula5 <- illiteracy ~  one + distmiss +lati + longi +  corr
+formula6 <- illiteracy ~  one + distmiss +lati + longi + 
+  area + tempe + alti + preci + rugg + river + coast + corr
+
+formula7 <- illiteracy ~  one + distmiss + ita 
+formula8 <- illiteracy ~ one + distmiss + ita+
+  area + tempe + alti + preci + rugg + river + coast
+```
+
+```{r, echo = FALSE}
+model1 <- lm(formula1, data = argentina_brazil_paraguay)
+
+model2 <- lm(formula2, data = argentina_brazil_paraguay)
+
+model3 <- lm(formula3, 
+             data = brazil_literacy)
+
+model4 <- lm(formula4 ,
+             data = brazil_literacy)
+
+model5 <- lm(formula5, data = argentina_literacy)
+
+model6 <- lm(formula6, data = argentina_literacy)
+
+### PARAGUAY ##
+
+model7 <- lm(formula7, 
+             data = paraguay_literacy)
+
+
+# lati longi cutoff1 cutoff1  illiteracy distmiss ita one
+model8 <- lm(formula8 , 
+             data = paraguay_literacy)
+
+
+models <- list(
+  model1 ,
+  model2 ,
+  model3 ,
+  model4 ,
+  model5 ,
+  model6 ,
+  model7 ,
+  model8 
+)
+```
+
+
+```{r, message=FALSE, echo = FALSE, warning=FALSE}
+
+withindata<- list(argentina_brazil_paraguay,argentina_brazil_paraguay,
+                  brazil_literacy, brazil_literacy, argentina_literacy,
+                  argentina_literacy, paraguay_literacy,paraguay_literacy)
+
+fe1 <- feols( illiteracy ~ distmiss + lati + longi + corr + ita + mis + mis1 + one |state , 
+              data = as.data.frame(withindata[[1]]))
+
+
+fe2 <- feols(illiteracy ~ distmiss + lati + longi + corr + ita + mis + mis1 + one +
+               area+ tempe + alti + preci + rugg + river + coast |state , 
+              data = as.data.frame(withindata[[2]]))
+
+fe3<-feols( illiteracy ~ lati + longi +  one + distmiss |state + mesorregi , 
+               data = as.data.frame(withindata[[3]]))
+
+
+fe4<-feols(illiteracy ~ lati + longi  + one + distmiss +
+                 area + tempe + alti + preci + rugg + river + coast
+                   |state +mesorregi, data = as.data.frame(withindata[[4]]))
+
+
+fe5 <- feols(illiteracy ~ lati + longi +  one + distmiss+ corr|state, 
+             data = as.data.frame(withindata[[5]]))
+
+fe6 <- feols( illiteracy ~ lati + longi  + one + distmiss +
+                area + tempe + alti + preci + rugg + river + coast + corr
+              |state , data = as.data.frame(withindata[[6]]))
+
+  
+fe7 <- feols( illiteracy ~  one + distmiss + ita|state,
+              data = as.data.frame(withindata[[7]]))
+
+fe8 <-  feols( illiteracy ~ one + distmiss + ita +
+                 area + tempe + alti + preci + rugg + river + coast
+               |state, data = as.data.frame(withindata[[8]]))
+
+FEs<- list(fe1,fe2,fe3,fe4,fe5,fe6,fe7, fe8)
+
+
+Withins<-c()
+
+for (i in 1:length(FEs)){
+  fereg<- FEs[[i]]
+  r2<-r2(fereg)
+  Withins[i]<- r2[6]
+}
+
+```
+
+We use the conleyreg function to estimate the conley standard errors. We tried to replicate the table as best as we could. 
+
+```{r, echo = FALSE}
+
+argentina_brazil_paraguay_conley<- argentina_brazil_paraguay
+argentina_brazil_paraguay_conley$lon<- argentina_brazil_paraguay$longi
+argentina_brazil_paraguay_conley$lat<- argentina_brazil_paraguay$lati
+
+brazil_conley<- brazil_literacy
+brazil_conley$lon<- brazil_literacy$longi
+brazil_conley$lat<- brazil_literacy$lati
+
+argentina_conley<- argentina_literacy
+argentina_conley$lon<- argentina_literacy$longi
+argentina_conley$lat<- argentina_literacy$lati
+
+paraguay_conley<- paraguay_literacy
+paraguay_conley$lon<- paraguay_literacy$longi
+paraguay_conley$lat<- paraguay_literacy$lati
+
+#### all models conley adj
+# Model 1: Applied to Argentina, Brazil, and Paraguay combined
+conleyreg_result1 <- conleyreg(
+  formula = formula1,
+  data = argentina_brazil_paraguay_conley,
+  dist_cutoff = 0.1,
+  lat = "lat",
+  lon = "lon",
+  model = "ols"
+)
+
+# Model 2: Applied to Argentina
+conleyreg_result2 <- conleyreg(
+  formula = formula2,
+  data = argentina_brazil_paraguay_conley,
+  dist_cutoff = 0.1,
+  lat = "lat",
+  lon = "lon",
+  model = "ols"
+)
+
+# Model 3: Applied to Paraguay
+conleyreg_result3 <- conleyreg(
+  formula = formula3, # Assuming a different formula or the same depending on your analysis
+  data = brazil_conley,
+  dist_cutoff = 0.1,
+  lat = "lat",
+  lon = "lon",
+  model = "ols"
+)
+
+# Model 4: Assuming another application on combined Argentina, Brazil, and Paraguay data
+conleyreg_result4 <- conleyreg(
+  formula = illiteracy ~  distmiss + lati + longi + one + area + tempe + alti + 
+    preci + rugg + river + coast,
+  data = brazil_conley,
+  dist_cutoff = 0.1,
+  lat = "lat",
+  lon = "lon",
+  model = "ols"
+)
+
+# Model 5: Assuming a repeated analysis on Argentina with a different formula
+conleyreg_result5 <- conleyreg(
+  formula = formula5, 
+  data = argentina_conley,
+  dist_cutoff = 0.1,
+  lat = "lat",
+  lon = "lon",
+  model = "ols"
+)
+
+# Model 6: Assuming a repeated analysis on Paraguay with a different formula
+conleyreg_result6 <- conleyreg(
+  formula = formula6, # Replace with your actual formula
+  data = argentina_conley,
+  dist_cutoff = 0.1,
+  lat = "lat",
+  lon = "lon",
+  model = "ols"
+)
+
+# Model 7 & 8: Continuing the pattern, assuming you have specific datasets or formulae
+# For illustrative purposes, I'll use placeholders. You should replace these with actual data/formula.
+
+# Model 7: Another model variant
+conleyreg_result7 <- conleyreg(
+  formula = formula7, # Replace with your actual formula
+  data = paraguay_conley, # Or whichever dataset applies
+  dist_cutoff = 0.1,
+  lat = "lat",
+  lon = "lon",
+  model = "ols"
+)
+
+# Model 8: Final model variant
+conleyreg_result8 <- conleyreg(
+  formula = formula8, # Replace with your actual formula
+  data = paraguay_conley, # Or whichever dataset applies
+  dist_cutoff = 0.1,
+  lat = "lat",
+  lon = "lon",
+  model = "ols"
+)
+
+
+modelsvec<- list(conleyreg_result1,conleyreg_result2,conleyreg_result3,conleyreg_result4,
+        conleyreg_result5,conleyreg_result6,conleyreg_result7,conleyreg_result8)
+
+SEs<-c()
+
+for (i in 1:length(modelsvec)){
+  s<-modelsvec[[i]]
+  SEs[i]<-s[,2][2]
+}
+
+```
+
+```{r, echo = FALSE, include = FALSE}
+
+stargazer(
+  models,
+  type = "latex",  # Change to "latex" if you're generating LaTeX output
+  title = "Effect on Illiteracy",
+  column.labels = c("Argentina, Brazil, and Paraguay", "Brazil", "Argentina", "Paraguay"),
+  covariate.labels = c("Mission distance", "Geo controls", "State fixed effects"),
+  omit.stat = c("adj.rsq", "f"),  # Omit adjusted R-squared and F-statistic
+  keep.stat = c("n", "rsq"), 
+  omit = "everything",  # Omit everything except the coefficients of interest
+  keep = "distmiss" , 
+  # Keep number of observations and R-squared
+  digits = 4,   
+  column.separate= c(2,2,2,2),
+  # Number of digits to round off to
+  star.cutoffs = c(0.05, 0.01, 0.001), # Set significance levels
+  add.lines = list(c("Conley SE",round(SEs,3)),
+                   c("Geo controls", "No", "Yes", "No", "Yes", "No", "Yes", "No","Yes"),
+                   c("Within R$^{2}$",round(Withins,3))),# Add line for Geocontrols
+  float.env = "sidewaystable" # to flip the table 90 degrees
+)
+
+```
+\begin{sidewaystable}[!htbp] \centering 
+  \caption{Effect on Illiteracy} 
+  \label{} 
+\begin{tabular}{@{\extracolsep{5pt}}lcccccccc} 
+\\[-1.8ex]\hline 
+\hline \\[-1.8ex] 
+ & \multicolumn{8}{c}{\textit{Dependent variable:}} \\ 
+\cline{2-9} 
+\\[-1.8ex] & \multicolumn{8}{c}{illiteracy} \\ 
+ & \multicolumn{2}{c}{Argentina, Brazil, and Paraguay} & \multicolumn{2}{c}{Brazil} & \multicolumn{2}{c}{Argentina} & \multicolumn{2}{c}{Paraguay} \\ 
+\\[-1.8ex] & (1) & (2) & (3) & (4) & (5) & (6) & (7) & (8)\\ 
+\hline \\[-1.8ex] 
+ Mission distance & 0.0105$^{**}$ & 0.0112$^{*}$ & 0.0200$^{***}$ & 0.0313$^{***}$ & 0.0157 & 0.0669$^{**}$ & 0.0043 & 0.0138 \\ 
+  & (0.0039) & (0.0046) & (0.0056) & (0.0077) & (0.0081) & (0.0232) & (0.0163) & (0.0264) \\ 
+  & & & & & & & & \\ 
+\hline \\[-1.8ex] 
+Conley SE & 0.004 & 0.005 & 0.006 & 0.009 & 0.007 & 0.019 & 0.012 & 0.023 \\ 
+Geo controls & No & Yes & No & Yes & No & Yes & No & Yes \\ 
+Within R$^{2}$ & 0.037 & 0.068 & 0.013 & 0.057 & 0.109 & 0.647 & 0.002 & 0.25 \\ 
+Observations & 548 & 548 & 467 & 467 & 42 & 42 & 39 & 39 \\ 
+R$^{2}$ & 0.0419 & 0.0730 & 0.0562 & 0.0951 & 0.1651 & 0.6689 & 0.0039 & 0.2513 \\ 
+\hline 
+\hline \\[-1.8ex] 
+\textit{Note:}  & \multicolumn{8}{r}{$^{*}$p$<$0.05; $^{**}$p$<$0.01; $^{***}$p$<$0.001} \\ 
+\end{tabular} 
+\end{sidewaystable} 
+
+
+## Operationalizations of Distances
+Below, we see each municipality and its proximity to its nearest Jesuit mission via color intensity.
+
+@ValenciaCaicedo2018 uses the nominal distance in km from each municipality's centroid to arrive at his distance measures.
+Alternative transformations to that could be log -transformations (i.e. \(log(d)\)) or methods for computing decay such as \(\frac{1}{distance^\gamma}\) or exponential decay. For the latter we used a beta of -0.01, for the former a $\gamma = 0.5$.
+
+
+```{r, echo = FALSE}
+################ Plotting the (almost properly) merged data #####
+
+# BRA
+states_BRA<-states_BRA[states_BRA$NAME_1!="RioGrandedoSul",]
+additional_rows <- data.frame(matrix(NA, nrow = nrow(states_BRA), ncol = ncol(m_BRA)))
+names(additional_rows) <- names(m_BRA)
+additional_rows$geometry <- states_BRA$geometry
+
+# Bind the new rows with 'm_BRA'
+m_BRA_plot<- rbind(m_BRA[m_BRA$NAME_1=="Rio Grande do Sul" ,], additional_rows)
+
+
+
+# ARG
+states_ARG<-states_ARG[states_ARG$NAME_1!=c("Corrientes","Misiones"),]
+additional_rows <- data.frame(matrix(NA, nrow = nrow(states_ARG), ncol = ncol(m_ARG)))
+names(additional_rows) <- names(m_ARG)
+additional_rows$geometry <- states_ARG$geometry
+
+# Bind the new rows with 'm_BRA'
+m_ARG_plot<- rbind(m_ARG[m_ARG$NAME_1%in%c("Corrientes", "Misiones") ,], additional_rows)
+
+
+# PRY
+states_PRY<-states_PRY[states_PRY$NAME_1!=c("Itapúa","Misiones"),]
+additional_rows <- data.frame(matrix(NA, nrow = nrow(states_PRY), ncol = ncol(m_PRY)))
+names(additional_rows) <- names(m_PRY)
+additional_rows$geometry <- states_PRY$geometry
+
+# Bind the new rows with 'm_BRA'
+m_PRY_plot<- rbind(m_PRY[m_PRY$NAME_1%in%c("Itapúa", "Misiones") ,], additional_rows)
+
+
+
+p <- ggplot(data = rbind(rbind(m_ARG_plot, m_PRY_plot),m_BRA_plot))+#[m_BRA$NAME_1=="Rio Grande do Sul" ,]) )+
+  geom_sf(aes(fill=distmiss, geometry=geometry)) +
+  theme_map() +
+  theme(legend.position = 'left')+
+  labs(x=NULL, y=NULL,
+       title="Distance to next Jesuit Mission")+
+  labs(fill="Distance (km)")
+
+
+country_borders <- p +
+  geom_sf(data = border_BRA, color = "red", fill=NA) +
+  theme_minimal()+
+  geom_sf(data = border_ARG, color = "red", fill=NA) +
+  theme_minimal()+
+  geom_sf(data = border_PRY, color = "red", fill=NA) +
+  theme_minimal()
+
+
+
+final_plot_zoom <- country_borders +
+  xlim(xmin = 62, xmax = 48) +
+  ylim(ymin = -35, ymax = -25)+
+  annotate("text", x = 58, y = -29, label = 'atop(bold("ARGENTINA"))', size = 2.5, col='red', parse=T)+
+  annotate("text", x = 54, y = -30, label = 'atop(bold("BRAZIL"))', size = 2.5, col='red', parse=T)+
+  annotate("text", x = 56.5, y = -27, label = 'atop(bold("PARAGUAY"))', size = 2.5, col='red', parse=T)
+
+```
+
+
+
+```{r, echo = FALSE}
+############## DISTANCE COMPUTATIONS ################
+
+plotdata<-rbind(rbind(m_ARG_plot, m_PRY_plot),m_BRA_plot)
+
+beta<- -0.01
+gamma<- 0.5
+
+
+plotdata$distmiss_log <- -log(plotdata$distmiss)
+plotdata$distmiss_decay<- exp(beta*plotdata$distmiss)
+plotdata$distmiss_onex <-  1/(plotdata$distmiss^gamma) 
+
+
+```
+
+Linear Decay: This function shows a direct, proportional decrease in weight with distance.
+
+Exponential Decay: The weight decreases exponentially with distance; the processes loses influence more rapidly.
+
+Inverse Decay: This function decreases inversely with the square root of distance, representing a more gradual decrease than exponential.
+
+Logarithmic Decay: Logarithmic decay shows a decrease that slows as distance increases; the initial decay is rapid but significant influence still extends over longer distances.
+
+```{r, echo = FALSE}
+# Create a sequence of distances, avoiding zero for logarithmic calculations
+distances <- seq(1, 500, length.out = 100)
+
+# Calculate decay values for each function
+linear_decay <- -distances * 1  # Multiplied by one to emphasize this is a scaled version
+exponential_decay <- exp(-0.01 * distances)
+inverse_decay <- 1 / sqrt(distances)
+logarithmic_decay <- -log(distances)  # Adding logarithmic decay
+
+# Combine data into a data frame for plotting
+data <- data.frame(
+  Distance = rep(distances, 4),
+  Weight = c(linear_decay, exponential_decay, inverse_decay, logarithmic_decay),
+  Type = factor(rep(c("Linear * (-1)", "Exponential", "Inverse", "Logarithmic * (-1)"), each = 100))
+)
+
+# Plot using ggplot2
+ggplot(data, aes(x = Distance, y = Weight, color = Type)) +
+  geom_line() +
+  facet_wrap(~Type, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "Distance Decay Functions",
+       x = "Distance",
+       y = "Weight",
+       color = "Decay Type") +
+  scale_color_manual(values = c("blue", "red", "green", "purple"))
+```
+
+```{r, echo=FALSE}
+  first <- ggplot(data = plotdata)+#[m_BRA$NAME_1=="Rio Grande do Sul" ,]) )+
+    geom_sf(aes(fill=distmiss_log , geometry=geometry)) +
+    theme_map() +
+    theme(legend.position = 'left')+
+    labs(x=NULL, y=NULL,
+         title="Distance to next Jesuit Mission - Logarithmic Decay")+
+    labs(fill="Log(Distance (km))")
+  
+  second<- first +
+    geom_sf(data = border_BRA, color = "red", fill=NA) +
+    theme_minimal()+
+    geom_sf(data = border_ARG, color = "red", fill=NA) +
+    theme_minimal()+
+    geom_sf(data = border_PRY, color = "red", fill=NA) +
+    theme_minimal()
+  
+  third_log<- second +
+    xlim(xmin = 62, xmax = 48) +
+    ylim(ymin = -35, ymax = -25)+
+    annotate("text", x = 58, y = -29, label = 'atop(bold("ARGENTINA"))', size = 2.5, col='red', parse=T)+
+    annotate("text", x = 54, y = -30, label = 'atop(bold("BRAZIL"))', size = 2.5, col='red', parse=T)+
+    annotate("text", x = 56.5, y = -27, label = 'atop(bold("PARAGUAY"))', size = 2.5, col='red', parse=T)
+  
+```
+
+```{r, echo=FALSE}
+  first <- ggplot(data = plotdata)+#[m_BRA$NAME_1=="Rio Grande do Sul" ,]) )+
+    geom_sf(aes(fill=distmiss_decay , geometry=geometry)) +
+    theme_map() +
+    theme(legend.position = 'left')+
+    labs(x=NULL, y=NULL,
+         title="Distance to next Jesuit Mission - Exponential Decay")+
+    labs(fill="Distance (km)")
+  
+  second<- first +
+    geom_sf(data = border_BRA, color = "red", fill=NA) +
+    theme_minimal()+
+    geom_sf(data = border_ARG, color = "red", fill=NA) +
+    theme_minimal()+
+    geom_sf(data = border_PRY, color = "red", fill=NA) +
+    theme_minimal()
+  
+  third_exp <- second +
+    xlim(xmin = 62, xmax = 48) +
+    ylim(ymin = -35, ymax = -25)+
+    annotate("text", x = 58, y = -29, label = 'atop(bold("ARGENTINA"))', size = 2.5, col='red', parse=T)+
+    annotate("text", x = 54, y = -30, label = 'atop(bold("BRAZIL"))', size = 2.5, col='red', parse=T)+
+    annotate("text", x = 56.5, y = -27, label = 'atop(bold("PARAGUAY"))', size = 2.5, col='red', parse=T)
+```
+
+
+
+
+```{r, echo=FALSE}
+first <- ggplot(data = plotdata)+#[m_BRA$NAME_1=="Rio Grande do Sul" ,]) )+
+    geom_sf(aes(fill=distmiss_onex , geometry=geometry)) +
+    theme_map() +
+    theme(legend.position = 'left')+
+    labs(x=NULL, y=NULL,
+         title="Distance to next Jesuit Mission - Inverse Distance Decay")+
+    labs(fill="1/Distance (km)^0.5")
+  
+second<- first +
+    geom_sf(data = border_BRA, color = "red", fill=NA) +
+    theme_minimal()+
+    geom_sf(data = border_ARG, color = "red", fill=NA) +
+    theme_minimal()+
+    geom_sf(data = border_PRY, color = "red", fill=NA) +
+    theme_minimal()
+  
+third_inv <- second +
+    xlim(xmin = 62, xmax = 48) +
+    ylim(ymin = -35, ymax = -25)+
+    annotate("text", x = 58, y = -29, label = 'atop(bold("ARGENTINA"))', size = 2.5, col='red', parse=T)+
+    annotate("text", x = 54, y = -30, label = 'atop(bold("BRAZIL"))', size = 2.5, col='red', parse=T)+
+    annotate("text", x = 56.5, y = -27, label = 'atop(bold("PARAGUAY"))', size = 2.5, col='red', parse=T)
+  
+```
+
+
+```{r echo=FALSE, out.width="70%", fig.align='center'}
+print(final_plot_zoom)
+print(third_log)
+print(third_exp)
+print(third_inv)
+```
+
+
+
+The choice of the distance decay function governs the propagation of treatment and spillover effects. We can see that different specifications of the distance parameters lead to significantly different treatment intensities. There is no objective criterion for the choice of the best distance decay function. Any deviation from the true underlying distance decay function will bias the results and reduce efficiency. @ValenciaCaicedo2018 baseline linear distance decay suggests that moving from 100 to 200 km has the same effect as moving from 400 to 500 kilometers. This seems somewhat unrealistic. In any case, at best the results are robust to the choice of the distance decay function. As an additional robustness check we replicate the main specification for three different distance decay functions. 
+
+
+```{r, echo = FALSE, include = FALSE}
+withindata<- list(argentina_brazil_paraguay,argentina_brazil_paraguay,
+                  brazil_literacy, brazil_literacy, argentina_literacy,
+                  argentina_literacy, paraguay_literacy,paraguay_literacy)
+
+fe2_lin <- lm(illiteracy ~ distmiss + lati + longi +
+               area+ tempe + alti + preci + rugg + river + coast +state , 
+              data = as.data.frame(withindata[[2]]))
+
+fe2_exp <- lm(illiteracy ~ I(exp(beta*distmiss)) + lati + longi +
+               area+ tempe + alti + preci + rugg + river + coast +state , 
+              data = as.data.frame(withindata[[2]]))
+
+fe2_log <- lm(illiteracy ~ I(log(distmiss)) + lati + longi +
+               area+ tempe + alti + preci + rugg + river + coast +state , 
+              data = as.data.frame(withindata[[2]]))
+
+fe2_inv <- lm(illiteracy ~ I(1/(sqrt(distmiss))) + lati + longi +
+               area+ tempe + alti + preci + rugg + river + coast +state , 
+              data = as.data.frame(withindata[[2]]))
+
+argentina_brazil_paraguay$linear_distmiss = argentina_brazil_paraguay$distmiss
+argentina_brazil_paraguay$exponential_distmiss = exp(-0.01 * argentina_brazil_paraguay$distmiss)
+argentina_brazil_paraguay$inverse_distmiss = 1 / sqrt(argentina_brazil_paraguay$distmiss)
+argentina_brazil_paraguay$logarithmic_distmiss = log(argentina_brazil_paraguay$distmiss)
+
+# Define the base formula, excluding the original distmiss variable for now
+base_formula <- illiteracy ~ lati + longi + corr + ita + mis + mis1 + one +
+  area + tempe + alti + preci + rugg + river + coast
+
+# Fit regression models with each distance decay variable
+model_linear <- lm(update(base_formula, . ~ . + linear_distmiss), data = argentina_brazil_paraguay)
+model_exponential <- lm(update(base_formula, . ~ . + exponential_distmiss), data = argentina_brazil_paraguay)
+model_inverse <- lm(update(base_formula, . ~ . + inverse_distmiss), data = argentina_brazil_paraguay)
+model_logarithmic <- lm(update(base_formula, . ~ . + logarithmic_distmiss), data = argentina_brazil_paraguay)
+
+# Define the decay variables explicitly
+variables_of_interest <- c("linear_distmiss", "exponential_distmiss", "inverse_distmiss", "logarithmic_distmiss")
+
+# Present the results in a regression table focusing only on the decay variables and excluding the constant term
+stargazer(model_linear, model_exponential, model_inverse, model_logarithmic,
+          title = "Regression Results with Different Distance Decay Functions",
+          keep = variables_of_interest,  # Keep only the specified decay variables
+          omit = "constant",  # Correct way to omit the intercept
+          single.row = TRUE, omit.stat = c("f", "ser", "rsq", "adj.rsq"))
+
+```
+
+\begin{table}[!htbp] \centering 
+  \caption{Regression Results with Different Distance Decay Functions} 
+  \label{} 
+\begin{tabular}{@{\extracolsep{5pt}}lcccc} 
+\\[-1.8ex]\hline 
+\hline \\[-1.8ex] 
+ & \multicolumn{4}{c}{\textit{Dependent variable:}} \\ 
+\cline{2-5} 
+\\[-1.8ex] & \multicolumn{4}{c}{base\_formula} \\ 
+\\[-1.8ex] & (1) & (2) & (3) & (4)\\ 
+\hline \\[-1.8ex] 
+ linear\_distmiss & 0.011$^{**}$ (0.005) &  &  &  \\ 
+  exponential\_distmiss &  & $-$2.172 (1.511) &  &  \\ 
+  inverse\_distmiss &  &  & 0.349 (0.946) &  \\ 
+  logarithmic\_distmiss &  &  &  & 0.078 (0.276) \\ 
+ \hline \\[-1.8ex] 
+Observations & 548 & 548 & 548 & 548 \\ 
+\hline 
+\hline \\[-1.8ex] 
+\textit{Note:}  & \multicolumn{4}{r}{$^{*}$p$<$0.1; $^{**}$p$<$0.05; $^{***}$p$<$0.01} \\ 
+\end{tabular} 
+\end{table} 
+
+We do not find a statistically significant effect for other transformed distance decay specifications.
+
+## Spatial Dependence and the Role of Geography
+
+The study by Caicdeo (2019) relies on the assumption that conditional on covariates the geographic location of the Jesuits missions was random. However, it is extremely difficult to control for all geographic factors that might affect both Jesuit mission locations and present day economic outcomes. In the context of Caicedo's (2019) study on the impact of Jesuit missions, it’s crucial to consider historical geographic factors which were not properly controlled for (due to data limitations) like land fertility that directly influences present-day outcomes as well as the selection of Jesuits missionaries. 
+
+Consider the alternative story to the one presented in the paper: Higher land fertility enhanced agricultural output, increasing population density and subsequently urbanization rates in areas where missions were historically located. This in turn might lead to higher literacy rates, not directly due to the missions themselves but because higher urbanization enables better access to educational resources. Additionally, areas with historically fertile land might now have higher uptake of genetically engineered soy, benefiting from greater returns on agricultural investments. This scenario illustrates how failing to account for such spatially varying historical factors could confound the results, attributing outcomes to the missions that are actually driven by underlying geographical characteristics. The fact that other missionaries did not settle in agricultural more productive places might be attributable to heterogeneity or simple spatial noise due to measurement error. 
+
+
+# Exercise C
+
+##The perils of ignoring peer effects 
+
+For a long time, researchers have considered network dynamics (and thus peer effects) as sources of potential contamination in randomized experiments; a violation of the stable unit treatment variable assumption [@Rubin1978]. Only recently economists have begun to explicitly model these network dependencies as ‚spillover effects’ [@bramoulle_peer_2020]. Ignoring peer effects threatens the internal validity of both experimental and non-experimental findings. To illustrate this, consider the effect of a program assigned at an individual level (some sort of mentoring program). To estimate the effect of such an intervention on an outcome of interest say grades, researchers typically employ class or school fixed effects. However, the fixed effects might capture some of the benefits if the intervention also improved the outcomes of peers. @miguel_worms_2004 study the effects of a deworming RCT in Kenya. They highlight that by not including peer effects in the form of reduced network transmission, the reduction in school absenteeism of the intervention are doubly undercounted. The intervention also reduced the incidence and thus school attendence at the control schools, which lead to an underestimate of the positive benefits of the intervention. 
+
+\textbf{Estimating Peer Effects} 
+
+In a sweeping review, @angrist_perils_2014 provides a critique of the economics literature on peer effects. He derives and demonstrates potential pitfalls by linking the behavior of IV estimation with group-level dummies with OLS. 
+In a linear-in-means model with exogenous effects (e.g. $Y_{i} = W X_{i} \beta + \varepsilon{i}$), he shows that the ‚social multiplier‘ is equivalent to the \emph{ratio} between the IV 2SLS and OLS estimand. 
+
+$\phi_{1} = \frac{\text{IV}}{\text{OLS}}$
+
+For an endogenous effects ($Y_{i} = W Y_{i} \delta + \varepsilon{i}$) model the \emph{difference} between the IV estimate and the OLS estimated is equivalent to the social multiplier.
+
+$\phi_{2} = \text{IV} - \text{OLS}$
+
+However, @angrist_perils_2014 cautions to interpret any obtained difference as the causal effect of peers. Selection bias, omitted variables, nonlinearities, and measurement error can inflate or deflate the IV estimate of the coefficient. Thus, any such study according to @angrist_perils_2014 is prone to misinterpretation.
+
+To uncover peer effects, randomization of peers into different environments allows researchers to draw internally valid inferences about exogenous peer effects. However, these research strategies can lack external validity, and are often practically infeasible. Network structure emerges endogenously. In the real-world friends are not being randomly assigned, but people sort into groups and networks (often based on homophily). Especially when it comes to long-run effects, it is hard to imagine an experiment or observational study that truly assigns peers characteristics in a manner that is orthogonal to individual characteristics. 
+
+How then can we learn something about peer effect and the importance of social networks?
+An innovative methodological contribution that sheds light on peer effects is @chetty_social_2022. The researchers investigate the impact of economic connectedness on economic mobility. @chetty_social_2022 do not rely on random assignment, nor do they estimate the impact of a specific policy experiment. Rather by relying on incredible rich Facebook data, the researchers can alleviate potential threats to identification like reverse causality. The researchers demonstrate that broad-based correlations can give us policy relevant insights into the importance and impacts of social networks.  
+
+\textbf{Network Dependence and Instruments}
+
+Network dependence can affect and impair the \textit{relevance} and \textit{validity} of an instrument variable. Consider the paper by @ramsay_revisiting_2011 who studies the relationship between natural resource wealth and political freedom. More specifically, he is interested in the causal effect of a countries annual oil income per capita on the level of democracy as measured by the polity IV score. The author estimates: 
+
+$\text{Democracy}_{i,t} = \mu + \text{OilIncomepercapita}_{i,t} + \delta X_{i,t} + \varepsilon_{i,t}$ 
+
+where $X_{i,t}$ denotes a vector of controls and for country i in year t. 
+
+However, this relationship likely suffers from reverse causality, as a countries political institutions will determine oil income, while concurrently oil income determines political freedom. @ramsay_revisiting_2011 proposes the ‚out-of-region natural disaster‘ as an IV for annual oil income. He splits the world into five supposedly unconnected regions and uses natural disasters in other regions, which impact the global oil price as an IV for annual oil income. Thus, @ramsay_revisiting_2011 identifies the variation in annual per capita oil income of a country that is caused by a natural disaster in other regions.
+
+$\text{Oilincomepercapita}_{i,t} = \mu + \theta \text{OutofRegionNaturalDisaster}_{i,t} + \delta X_{i,t} + \varepsilon_{i,t}$
+
+Now how might spatial dependence in networks impact the validity (i.e. the exclusion restriction) of the instrument. 
+
+$\text{Cov}(\text{OutofRegionNaturalDisaster}_{i,t}, \varepsilon_{i,t} / X_{i,t}) = 0$
+
+Network dependence through spatial interdependence can lead to a violation of the exclusion restriction [@Betz2019]. The changes and levels of countries political institutions are correlated and clustered in space. Take for example the recent wave of military coups in Africa which likely affects the political institutions in other regions through (for example) increased migration, as well. Secondly, the coarse aggregation of the world into five regions is creating spatial dependence. The shocks induced by natural disasters might themselves be spatially correlated in a systematic manner with other shocks. Consider a natural disaster in South America which might induce changes in the US foreign aid network, by redirecting resources away from one country to another. A reduction in foreign aid in Africa might then concurrently impact political freedom in Africa. Another obvious candidate for violations of the assumptions is that natural disasters will affect trade networks which can in turn impact political institutions. Thus the effects of shocks induced by natural disasters are clustered in space through countless channels. The authors assumption that, by dividing the world into five regions and that the shocks in those regions are systematically unrelated seems implausible. 
+The \textit{relevance} of the instrument, however, is not directly impaired by network dependence as the first stage F-test still demonstrates that the instrument is correlated with oil income per capita. 
+
+
+# Exercise D
+After a quick web search, we found the photo on the Wikipedia page about 'Pandemonium Architecture', a theory in cognitive science about the visual processing of images in the brain. On Wikipedia the photo of the dog is uploaded in jpeg format. 
+However, since this is a screenshot that contains the comment with the typeface as well, we suspect that this photo is stored as a pdf or png file and was inserted as such in the assignment document. 
+
+\newpage
+
+\textbf{Bibliography}
+
+

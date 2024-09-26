@@ -1,0 +1,1083 @@
+---
+title: "Spatial Economics -- Assignment 3"
+author:
+  - "Gustav Pirich (h11910449)"
+  - "Gabriel Konecny (h11775903)"
+date: "May 4, 2024"
+output:
+  pdf_document:
+    toc: true
+    includes:
+      in_header: !expr file.path("~/Desktop/GITHUB/spatial_econ/helper/wraper_code.tex")
+bibliography: references.bib
+nocite: '@*'
+header-includes:
+  - \usepackage{tcolorbox}
+  - \usepackage[default]{lato}
+  - \usepackage{rotating}
+  - \usepackage{dcolumn}
+  - \usepackage{booktabs}
+papersize: a4
+geometry: margin=2cm
+urlcolor: DarkOrchid!65!black
+---
+
+
+```{r, setup, echo = FALSE, warning=FALSE, results = 'hide'}
+knitr::opts_knit$set(root.dir = rprojroot::find_rstudio_root_file())
+knitr::opts_chunk$set(tidy.opts = list(width.cutoff = 80), tidy = TRUE)
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+
+pacman::p_load(spatialreg, showtext, magritr, bsreg, spdep, patchwork, gridExtra, fixest, splm, stringi, stringr, stringdist, haven, sf, dplyr, fuzzyjoin, comparator, digest, zoomerjoin, ggplot2, tidyr, ggthemes, viridis, fixest, conleyreg, plm, stargazer, bsreg, igraph, generics, knitr, kableExtra, formatR,readxl, haven, flextable, broom, units, sysfonts, showtextdb)
+```
+
+\vspace{2em}
+
+\begin{tcolorbox}
+\centering \itshape The code that was used in compiling the assignment is available on GitHub at \url{https://github.com/gustavpirich/spatial_econ/blob/main/03_assignment/03_assignmnet.Rmd}.
+\end{tcolorbox}
+
+\newpage
+
+
+# Exercise A
+```{r, echo = FALSE, results='hide'}
+cigar_states <- st_read(file.path("data","cigarettes","cigar_states.xls"))
+cigarette_2var <- readxl::read_excel(file.path("data","cigarettes","cigarette+2var.xls")) %>%
+                        relocate(state, .before=year) 
+
+test <- cbind(cigar_states, cigarette_2var[,"state"])[,"Name"]
+
+data <- cigarette_2var[c("state", "year", "logc", "logp","logy")] %>%
+        mutate(state = cbind(cigar_states, cigarette_2var[,"state"])[,"Name"])
+W_vega <- as.matrix(readxl::read_excel(file.path("data","cigarettes","W_vega.xls"), col_names=FALSE), dimnames=FALSE)
+
+W.adj <- as.matrix(readxl::read_excel(file.path("data","cigarettes","Spat-Sym-US.xls"), col_names=FALSE), dimnames=FALSE)
+# <- nb2listw(W.adj,style="W")
+
+#usalw <- mat2listw(usaww, style="W")
+scale <- function(x){
+  x/sum(x)
+}
+W <- t(apply(W.adj,1,scale))
+W_ <- kronecker(diag(nrow(unique(cigarette_2var[,"year"]))), W)
+
+lW <- mat2listw(W, style="W")
+#lW <- mat2listw(W.adj)
+```
+
+## Estimate the demand model, and test for spatial dependence using the procedures discussed in class, and the provided weights matrix. Suppress any theoretical considerations
+ 
+## Stage 1
+The demand model without spatial effects can by estimated by using the package plm:
+```{r, results = "asis", echo = FALSE}
+model1 <- plm(logc~logp+logy, data=data, model="within", effect="twoways")
+stargazer(model1, type = "latex", header=FALSE, add.lines = list(c("State FE", "X"), c("Year FE", "X")), title = "")
+
+data_big <- cigarette_2var %>%
+            fastDummies::dummy_cols(select_columns = "year") %>%
+            fastDummies::dummy_cols(select_columns = "state") %>%
+            select(c(logc, logp,logy, starts_with("year_")|starts_with("state_")))
+OLS <- lm(logc ~ ., data_big)
+
+```
+The demand for cigarettes depends negatively on the price of the cigarettes and positively on the real disposable income. 
+
+We now test for spatial autocorrelation. Global Moran's I is highly statistically significant, presenting evidence that there is indeed spatial autocorrelation in the residuals.    
+```{r, echo = FALSE}
+moran_result_dist <- lm.morantest(OLS, mat2listw(W_, style = "W"))
+moran_result_dist
+```
+
+```{r, include = FALSE, eval = FALSE}
+data_big <- cigarette_2var %>%
+            fastDummies::dummy_cols(select_columns = "year") %>%
+            fastDummies::dummy_cols(select_columns = "state") %>%
+            select(c(logc, logp,logy, starts_with("year_")|starts_with("state_")))
+OLS <- lm(logc ~ ., data_big)
+
+# Get the summary of the model
+summary_OLS <- summary(OLS)
+
+# Extract coefficients and p-values
+coefficients <- summary_OLS$coefficients[, 1]
+p_values <- summary_OLS$coefficients[, 4]
+variable_names <- rownames(summary_OLS$coefficients)
+
+# Merge coefficients with stars denoting significance level and variable names
+coefficients_with_stars <- paste0(variable_names, ": ", round(coefficients, 6), 
+                                  ifelse(p_values < 0.001, "***", 
+                                  ifelse(p_values < 0.01, "**", 
+                                  ifelse(p_values < 0.05, "*", 
+                                  ifelse(p_values < 0.1, ".", "")))))
+
+# Print the coefficients with stars
+print(coefficients_with_stars)
+```
+## Stage 2
+
+We now run the testing procedures as we learnt in class; 
+```{r, echo = FALSE}
+fm1 <- logc ~ logp + logy
+```
+
+```{r}
+# Spatial lag structure?
+slmtest(fm1, data=data, listw=lW, test="lml", model="within", effect="twoways")
+
+# Spatial error structure?
+slmtest(fm1, data=data, listw=lW, test="lme", model="within", effect="twoways")
+
+# Robust versions:
+# Spatial lag allowing for spatial error?
+slmtest(fm1, data=data, listw=lW, test="rlml", model="within", effect="twoways")
+
+# Spatial error allowing for spatial lag?
+slmtest(fm1, data=data, listw=lW, test="rlme", model="within", effect="twoways")
+```
+The first two tests present evidence for the presence of spatial error dependence and spatial lag dependence. However, once we run the 'locally robust' versions of the test, we find that (allowing for spatial error dependence) there is actually no evidence for a spatial lag dependence. Thus according to the classical specification search procedure, we should estimate a \textbf{SEM model}. 
+
+## Estimate the model implied by the specification search and contrast the effect estimates with a SLX model specification:
+
+Let us proceed by using the spml function. We can estimate the SEM model by setting the spatial lag of dependent variable to false (lag=FALSE):
+```{r, echo=FALSE}
+data <- data.frame(data)
+sem <- spml(fm1, data, listw=lW, lag=FALSE, spatial.error = "b", 
+                    model="within", effect="twoways") 
+```
+
+The SLX model can be estimated using OLS, for example by using the plm() function from before where we include the spatially lagged values of the explanatory variables:
+```{r}
+
+slx_OLS <- function(W){
+W_ <- kronecker(diag(nrow(unique(cigarette_2var[,"year"]))), W)
+W_logp <- W_ %*% data[,"logp"]
+W_logy <- W_ %*% data[,"logy"]
+data_slx <- cbind(data, W_logp, W_logy)
+slx <- plm(logc~logp+logy+W_logp+W_logy, data=data_slx, model="within", effect="twoways")
+return((slx))
+}
+
+```
+
+Now, to compare both lets look at the regression outputs: 
+```{r, echo = FALSE}
+summary(sem)
+```
+
+```{r, results = "asis", echo = FALSE}
+stargazer(slx_OLS(W), type = "latex", header = FALSE, title = "SLX Model")
+```
+
+The coefficient estimates above correspond to those reported in table 2 of @HalleckVega2015. Both the SEM and SLX suggest, on average, a decrease in domestic demand for cigarettes of around 1% following an increase in domestic prices by 1%, ceteris paribus. Similarly both models suggest an increase in demand for cigarettes given an increase in domestic income. The SLX coefficient estimate for this is higher. Additionally, the SLX model provides effects of lagged independent variables of cigarette demand. The SEM model does not provide any additional meaningful parameters since its parameter for spatial autocorrelation of errors is a \textit{nuisance parameter}.
+
+## What could be the rationale to use the SLX model as opposed to other spatial specifications?
+
+The choice of the model should be based on theory. If we expect spillovers of exogenous variables and spillovers of endogenous variables or correlation of error terms is expected to be less pronounced or absent, it might be a good idea to consider the SLX model. However, there are also reasons to consider SLX as a point of departure even if the theory is not clear about which model to choose. First, when using the SLX model, the estimation and interpretation of spillover effects is more straightforward. In contrast to endogenous models, SLX allows us to parameterize W and its parameters can be estimated. An undesirable property of SAR and SAC models is that the ratio between the spillover and direct effects is the same for every explanatory variable. This is not the case for SLX model, where we get flexible estimates of both by construction. Thus SLX can be considered less imposing in this perspective.
+
+## Which type(s) of spillover(s) would you expect in the model for cigarette demand?
+
+We would expect no endogenous spillover effects, since we consider it unlikely that demand for cigarettes in a country should determine demand for cigarettes in neighboring country if there are no shortages. If however, the price of cigarettes in neighboring country is lower, people living near the border could be buying cigarettes in the neighboring country. This is called \textit{bootlegging effect}. On other hand, if the income in our country increases, the opportunity costs of time of our citizens increase and they might then prefer to buy the more expensive cigarettes in home country instead. Thus we would expect spatially lagged exogenous variables to be relevant: An increase in price of cigarettes in neighboring country should have positive effect on the demand for cigarettes in home country. Increase in income of neighboring country should have negative effect on the demand for cigarettes in home. 
+
+## Re-run the analysis using a SLX model with a distance decay specification (between centers) for the weights matrix, i.e. $w_{ij} = \frac{1}{\gamma_{ij}}$  following Halleck Vega and Elhorst (2015). Use a distance decay parameter of $\gamma$ = 3
+
+For this we first create a neighbour list, where all regions are neighbors by setting the distance threshold to big enough value and then compute distances using nbdists. They are then transformed as suggested above and scaled by maximum eigenvalue as in the paper.
+
+```{r}
+coords <- cigar_states[,2:3]
+
+decay <- function(gamma){
+distw <<- dnearneigh(coords, 0, 999999, row.names=cigar_states$Name, longlat=FALSE)
+dists <- nbdists(distw, coords, longlat=FALSE)
+ids <- lapply(dists, function(x) lapply(x, function(y) 1/(y^gamma)))
+lWd <- nb2listw(distw, glist = ids, style = "B",zero.policy=TRUE)
+Wd1 <- listw2mat(lWd)
+Wd <- Wd1 / max(abs(eigen(Wd1)$values))
+return(Wd)
+}
+Wd <- decay(3) 
+colnames(Wd) <- rownames(Wd)
+```
+
+Using gamma similar to the paper, we get coefficient estimates which are very close to those in the paper:
+```{r, results = "asis", echo = FALSE}
+stargazer(slx_OLS(Wd), type = 'latex',header = FALSE, title = "DIstance Decay SLX")
+```
+While the interpretation is non-lagged independent variables is similar as in regressions above, we might want to focus on spatiall lagged variables. The model suggests that increase in price of cigarettes in neighboring regions increases demand for cigarettes in home region, ceteris paribus. This is consistent with the bootlegging behavior discussed in the paper, which predicts that some people might buy cigarettes in/from other regions if the price there is lower. The coefficient estimate for income in neighboring regions suggest lower demand for cigarettes if the real income in neighboring regions  increases. This suggests that if people have higher income their opportunity cost of time is higher and they might prefer the convenience of buying cigarettes in their home region. 
+
+- Describe the network recovered by Halleck Vega and Elhorst (2015):
+```{r}
+distw
+46*46-46
+(46*46-46)/46*46
+```
+
+In this network all agents are connected, only the weights differ - which are given by the distance decay formula above. This corresponds to average number of links being 45 i.e. all regions except the region itself. Thus the percentage of nonzero weights simply gives the share of diagonal elements of a 46*46 matrix.
+
+Below we visualize the spatial weights matrix:
+```{r, echo=FALSE, fig.align = "center"}
+lattice::levelplot((Wd), main="Distance Decay Spatial Weights Matrix",
+scales = list(x=list(cex=0.45,rot=90),y=list(cex=.3)))
+```
+ 
+Reminding ourselves that all regions except the diagonal are neighbors, we can see that the definition of distance decay parameter used results in few strongly connected neighbors and many weaker connections. 
+
+- Who are the central agents and where do spillover effects occur?
+
+We could define the most central agent as one, who has the strongest connection to other regions overall. This could correspond to maximizing the nonlinear transformation of distance which we are using. Thus an agent is most central,if the sum of its weights to other agents is highest, i.e. if the sum of its row is highest. 
+
+```{r, echo=FALSE}
+head(arrange(data.frame(value = rowSums(Wd)), desc(value)))
+```
+
+Maryland is most central agent. It could be that since multiple small regions from around Maryland are included, Maryland has very small distance to them and thus its inverse is large, contributing a lot to maximization of criterion made up above. Thus the most central agent is the one who has many close neighbors. From the table above we see that other important agents are the District of Columbia, Massachusetts and Rhode Island.
+
+We get similar results when using eigenvector centrality:
+
+```{r, echo=FALSE}
+G <- graph_from_adjacency_matrix(
+  Wd,
+  mode = c("undirected"),
+  weighted = TRUE,
+)
+
+ec <- data.frame(state=cigar_states$Name, ec=eigen_centrality(G)$vector) %>%
+      arrange(desc(ec))
+
+knitr::kable(ec, caption = "Eigenvector Centrality")
+
+```
+
+- What is the average partial effect of increasing income?
+
+We compute APE as follows:
+$\beta_{logy} + \theta_{logy}\frac{1}{N}\sum_{j}^{J}\sum_{i}^{I}  w_{ij}$
+where I is number of rows of W and J number of columns. 
+```{r}
+beta <- coef(slx_OLS(Wd))[["logy"]]
+theta <- coef(slx_OLS(Wd))[["W_logy"]]
+N <- nrow(Wd)*ncol(Wd)
+beta + theta*sum(Wd)/N
+```
+Thus, the average partial effect of increasing income of is very close to the effect of increasing income in home only. This is because using the specification of distance decay above, the links between the agents are mostly weak.
+
+\newpage
+
+## Bonus 
+
+We will now use the bsreg package to estimate the distance decay parameter. We follow the procedure layed out in @Kuschnig2022 and the accompanying GitHub repository. Using the function bslx from bsreg we estimate $\gamma$ from  @HalleckVega2015 in the code below. Since we use exactly the same data and model as in the paper corresponding to the bsreg (Kuschnig 2022), we reuse the specification for the prior parameter. 
+
+The estimate of gamma (delta_SLX) using Bayesian methods is similar to that of @HalleckVega2015. 
+
+```{r, echo = FALSE, results = FALSE}
+library("dplyr")
+library("readxl")
+# Prepare the data
+contig <- read_excel(file.path("data","cigarettes","Spat-Sym-US.xls"),
+  col_names = paste0(1:46)) %>% as.matrix()
+df <- read_excel(file.path("data","cigarettes","cigarette+2var.xls")) %>%
+  mutate(year = factor(year + 1963), state = factor(state))
+xy <- read_excel(file.path("data","cigarettes","cigar_states.xls"), col_names = TRUE)
+
+# Utah has a wrong longitude
+xy %>% filter(Name == "UTAH") # 11.9 is off the Irish coast
+xy <- xy %>% mutate(longitude = ifelse(Name == "UTAH", 111.7, longitude))
+
+# Connectivities ---
+n_time <- length(unique(df$year))
+# Contiguity matrix
+W_cont <- kronecker(diag(n_time), contig / rowSums(contig))
+# Inverse-distance decay function
+dist <- as.matrix(dist(xy))
+diag(dist) <- Inf # Diagonal elements will be 0
+Psi <- function(delta) {
+  W_dist <- dist ^ (-delta) # Build
+  W_dist <- W_dist / max(eigen(W_dist, symmetric = TRUE)$values) # Scale
+  kronecker(diag(n_time), W_dist)
+}
+W_dist <- Psi(3)
+
+# Prepare variables ---
+y <- cbind(logc = df$logc)
+X <- model.matrix(logc ~ logp + logy + year + state, data = df)
+X_lag <- X[, c("logp", "logy")]
+colnames(X_lag) <- c("wlogp", "wlogy")
+X_cont <- W_cont %*% X_lag
+```
+
+```{r, eval = FALSE}
+# Settings for MCMC
+n_save <- 50000L
+n_burn <- 10000L
+
+# Estimate SLX model with uncertainty around delta. 
+out_slxdx <- bslx(y ~ X, W = Psi, X_SLX = X_lag,
+  n_save = n_save, n_burn = n_burn, options = set_options(
+    SLX = set_SLX(delta = 3, delta_scale = 0.05, delta_a = 2, delta_b = 2)))
+
+saveRDS(out_slxdx, "./models/out_slxdx.rds")
+```
+We use an inverse gamma prior with shape and scale parameter 2. The support is (0, $\infty$). We then plot the posterior density of the connectivity parameter. We find that the posterior mean is close to 3, which is in line with @HalleckVega2015. The figure nicely visualizes the uncertainty around the connectivity parameter. The highest posterior density is from [2.7, 3.4].     
+
+```{r, echo = FALSE, echo = FALSE, fig.align ='center'}
+out_slxdx <- readRDS("./models/out_slxdx.rds")
+
+kable(mean(out_slxdx$draws[,"delta_SLX"]), col.names = "Posterior Mean")
+
+plot(density(out_slxdx$draws[,"delta_SLX"]) ,main = "Posterior Density")
+# Calculate quantiles; for example, 25th, 50th, and 75th percentiles
+quantiles <- quantile(out_slxdx$draws[,"delta_SLX"], probs = c(0.05, 0.5, 0.95))
+
+# Add vertical lines for quantiles
+abline(v = quantiles, col = c("red", "blue", "red"), lwd = 2)
+
+# Adding legends manually, just for clarity (optional)
+legend("topright", legend = paste0(c("5%", "50% Median", "95%")), 
+       col = c("red", "blue", "red"), lwd = 2)
+
+kable(rbind(quantile(out_slxdx$draws[,"delta_SLX"], p = c(0.05, 0.5, 0.95))),
+      caption = "Quantile for Posterior Gamma")
+```
+
+
+# Exercise B
+```{r, echo = FALSE}
+setwd("~/Desktop/GITHUB/spatial_econ/data/03_assignment/dataset")
+
+raster_Africa <- read_sf("~/Desktop/GITHUB/spatial_econ/data/03_assignment/dataset/raster_Africa.shp")
+
+geoconflict_main <- read_dta("~/Desktop/GITHUB/spatial_econ/data/03_assignment/dataset/geoconflict_main.dta")
+
+intersect_coord <- read_dta("~/Desktop/GITHUB/spatial_econ/data/03_assignment/dataset/intersect_coord.dta")
+```
+
+## Unit of Observation
+```{r, echo = FALSE}
+raster_Africa <- read_sf("~/Desktop/GITHUB/spatial_econ/data/03_assignment/dataset/raster_Africa.shp")
+
+area <- st_area(raster_Africa)
+
+raster_Africa <- raster_Africa %>%
+  mutate(area = st_area(geometry))
+
+data <- data.frame(Cells = c("Min", "Mean", "Median", "Max"), Stats = c(min(area), mean(area), median(area), max(area)))
+
+kable(data)
+```
+The unit of observation are cells in a raster representing a 1×1 degree latitude longitude grid cover. At the equator this corresponds to a side length of 110 km. The areal extension of the cells varies with latitude. Further away from the equator, the area of a cell decreases. 
+The table shows the area of the cells. The smallest cell has an area of about 9.785 $km^{2}$, the largest 12.364 $km^{2}$. On average the size of the cells is 11.900 $km^{2}$. Thus the gap between the smallest and largest cell amounts to about 20%.
+They differ because of the distortions induced by the projection of the surface of the earth, onto a 2 dimensional raster grid. 
+
+## Interpretation of Coefficients
+The binary contiguity matrix is \textit{not} row normalized. This implies that the coefficients for the spatially lagged dependent and independent variables need to be interpreted as the direct impact of marginal changes in only \textit{one} of the neighboring cells. To obtain summary statistics of hte average partial effect and direct and indirect impacts, the spatial weight matrix has to to be considered (through row and columnwise summation).
+
+## Replication
+
+```{r, echo = FALSE, include = FALSE}
+# preparation of dataset --------------------------------------------------
+
+# exclude year 1997 to obtain same number of observations
+geoconflict_main_if <- geoconflict_main %>% 
+  filter(!year == 1997)
+
+# format as factor 
+geoconflict_main_if$year <- as.factor(geoconflict_main_if$year)
+geoconflict_main_if$cell <- as.factor(geoconflict_main_if$cell)
+
+
+################
+# 1st Column OLS
+
+fml1 = ANY_EVENT_ACLED ~ SPEI4pg + L1_SPEI4pg + L2_SPEI4pg + GSmain_ext_SPEI4pg + L1_GSmain_ext_SPEI4pg + L2_GSmain_ext_SPEI4pg + elevation_cell + rough_cell + area_cell + as.factor(use_primary) + 
+  dis_river_cell + as.factor(shared) +  as.factor(border) + as.factor(any_mineral) + ELF + i(country_largest_share, as.numeric(year), ref = "Zimbabwe") | as.factor(year)
+
+mod1 <- feols(fml1, 
+              data = geoconflict_main_if, 
+              panel.id = c('cell', 'year'))
+
+################
+
+
+################
+# 2nd Column OLS - missing spatially lagged linear time trends - also column 2 in the table looks like there are some coefficients/standard errors missing? 
+
+fml2 = ANY_EVENT_ACLED ~ SPEI4pg + L1_SPEI4pg + L2_SPEI4pg + GSmain_ext_SPEI4pg + L1_GSmain_ext_SPEI4pg + L2_GSmain_ext_SPEI4pg + W_L2_GSmain_ext_SPEI4pg + W_L1_GSmain_ext_SPEI4pg + W_GSmain_ext_SPEI4pg + W_SPEI4pg + W_L1_SPEI4pg + W_L2_SPEI4pg + elevation_cell + 
+  rough_cell + area_cell + as.factor(use_primary) + 
+  dis_river_cell + as.factor(shared) +  as.factor(border) + as.factor(any_mineral)+ ELF + W_elevation_cell + W_rough_cell + W_area_cell + W_ELF + as.factor(W_any_mineral) + as.factor(W_border) + as.factor(W_shared)  + 
+  W_dis_river_cell + as.factor(W_use_primary) + i(as.factor(country_largest_share), as.numeric(year), ref = "Zimbabwe") | as.factor(year)
+
+mod2 <- feols(fml2, 
+              data = geoconflict_main_if, 
+              panel.id = c('cell', 'year'))
+
+################
+
+etable(mod1, mod2, tex = TRUE,
+       keep = c("SPEI4pg", "L1_SPEI4pg", "L2_SPEI4pg", "GSmain_ext_SPEI4pg", "L1_GSmain_ext_SPEI4pg", "L2_GSmain_ext_SPEI4pg", "W_SPEI4pg",  "W_L1_SPEI4pg", "W_L2_SPEI4pg", "W_GSmain_ext_SPEI4pg", "W_L1_GSmain_ext_SPEI4pg", "W_L2_GSmain_ext_SPEI4pg"))
+```
+\begingroup
+\centering
+\begin{tabular}{lcc}
+   \tabularnewline \midrule \midrule
+   Dependent Variable: & \multicolumn{2}{c}{ANY\_EVENT\_ACLED}\\
+   Model:                          & (1)             & (2)\\  
+   \midrule
+   \emph{Variables}\\
+   SPEI4pg                         & 0.0346$^{***}$  & 0.0101\\   
+                                   & (0.0053)        & (0.0149)\\   
+   L1\_SPEI4pg                     & 0.0026          & 0.0127\\   
+                                   & (0.0049)        & (0.0135)\\   
+   L2\_SPEI4pg                     & 0.0104$^{**}$   & -0.0096\\   
+                                   & (0.0049)        & (0.0140)\\   
+   GSmain\_ext\_SPEI4pg            & -0.0338$^{***}$ & -0.0052\\   
+                                   & (0.0088)        & (0.0158)\\   
+   L1\_GSmain\_ext\_SPEI4pg        & -0.0321$^{***}$ & -0.0429$^{***}$\\   
+                                   & (0.0081)        & (0.0158)\\   
+   L2\_GSmain\_ext\_SPEI4pg        & -0.0348$^{***}$ & -0.0239\\   
+                                   & (0.0085)        & (0.0156)\\   
+   W\_L2\_GSmain\_ext\_SPEI4pg     &                 & -0.0027\\   
+                                   &                 & (0.0026)\\   
+   W\_L1\_GSmain\_ext\_SPEI4pg     &                 & 0.0020\\   
+                                   &                 & (0.0026)\\   
+   W\_GSmain\_ext\_SPEI4pg         &                 & -0.0058$^{**}$\\   
+                                   &                 & (0.0027)\\   
+   W\_SPEI4pg                      &                 & 0.0044$^{*}$\\   
+                                   &                 & (0.0023)\\   
+   W\_L1\_SPEI4pg                  &                 & -0.0017\\   
+                                   &                 & (0.0021)\\   
+   W\_L2\_SPEI4pg                  &                 & 0.0036$^{*}$\\   
+                                   &                 & (0.0021)\\   
+   \midrule
+   \emph{Fixed-effects}\\
+   as.factor(year)                 & Yes             & Yes\\  
+   \midrule
+   \emph{Fit statistics}\\
+   Observations                    & 35,042          & 35,042\\  
+   R$^2$                           & 0.18918         & 0.19568\\  
+   Within R$^2$                    & 0.18655         & 0.19307\\  
+   \midrule \midrule
+   \multicolumn{3}{l}{\emph{Clustered (cell) standard-errors in parentheses}}\\
+   \multicolumn{3}{l}{\emph{Signif. Codes: ***: 0.01, **: 0.05, *: 0.1}}\\
+\end{tabular}
+\par\endgroup
+
+```{r, echo = FALSE}
+# generate spatial weights matrix -----------------------------------------
+geoconflict_main_weights <- geoconflict_main_if %>%
+  st_as_sf(coords = c("lat", "lon"), crs = "WGS84") %>%
+  filter(year == 2011) # could be any year
+
+# setting the distance threshold to 180 kilometers
+neighboors <- dnearneigh(st_centroid(geoconflict_main_weights), d1 = 0, d2 = 180, use_s2 = TRUE)
+
+# create binary spatial weights matrix
+listwmat <- nb2listw(neighboors, style ="B", zero.policy = TRUE)
+```
+
+
+```{r, include = FALSE, eval = FALSE}
+################
+# 3rd Column  -----------------------------------------------------
+
+# specification 3 - we might be missing the country specific linear time trends of the neighbors 
+mod3 <- spml(ANY_EVENT_ACLED ~ lag(ANY_EVENT_ACLED) + SPEI4pg + L1_SPEI4pg + L2_SPEI4pg + GSmain_ext_SPEI4pg + L1_GSmain_ext_SPEI4pg + L2_GSmain_ext_SPEI4pg + W_GSmain_ext_SPEI4pg +
+                               W_L1_GSmain_ext_SPEI4pg + W_L2_GSmain_ext_SPEI4pg + W_SPEI4pg + W_L1_SPEI4pg + W_L2_SPEI4pg + elevation_cell + as.factor(W_border) +
+                               rough_cell + area_cell + as.factor(use_primary) + dis_river_cell + as.factor(shared) +  as.factor(border) + as.factor(any_mineral) +
+                               ELF + W_elevation_cell + W_rough_cell + W_area_cell + W_ELF + as.factor(W_any_mineral) + as.factor(W_shared)  + 
+                               W_dis_river_cell + as.factor(W_use_primary) +  as.factor(country_largest_share):as.numeric(year), # country specific linear time trends
+                             data = as.data.frame(geoconflict_main_if), 
+                             index=c("cell","year"),
+                             listw = listwmat,
+                             model="pooling",
+                             effect = "time",  
+                             dynamic = TRUE,
+                             spatial.error="none",
+                             zero.policy = TRUE, 
+                             lag=TRUE)
+################
+
+################
+# saving the output because computation takes long
+saveRDS(mod3, "./models/mod3.rds")
+################
+
+################
+# 4th column 
+
+# Preparation adding column for country x year fixed effects (country_year_fe)
+geoconflict_main_fe <- geoconflict_main_if %>% 
+  mutate(country_year_fe = paste0(country_largest_share, year))
+
+mod4 <- spml(ANY_EVENT_ACLED ~ lag(ANY_EVENT_ACLED) + SPEI4pg + L1_SPEI4pg + L2_SPEI4pg + GSmain_ext_SPEI4pg + L1_GSmain_ext_SPEI4pg + L2_GSmain_ext_SPEI4pg + W_GSmain_ext_SPEI4pg + W_L1_GSmain_ext_SPEI4pg + W_L2_GSmain_ext_SPEI4pg + W_SPEI4pg + W_L1_SPEI4pg + W_L2_SPEI4pg + elevation_cell + rough_cell + area_cell + as.factor(use_primary) + dis_river_cell + as.factor(shared) +  as.factor(border) + as.factor(W_border) + as.factor(any_mineral) +
+                              ELF + W_elevation_cell + W_rough_cell + W_area_cell + W_ELF + as.factor(W_any_mineral) + as.factor(W_shared)  + 
+                              W_dis_river_cell + as.factor(W_use_primary) + as.factor(country_year_fe), # country x year FE
+                             data = as.data.frame(geoconflict_main_fe), 
+                             index= c("cell","year"),
+                             listw = listwmat,
+                             model = "pooling",  # no fixed effects
+                             effect = "individual", 
+                             spatial.error="none",
+                             zero.policy = TRUE, 
+                             dynamic = TRUE,
+                             lag = TRUE, 
+                             Hess = TRUE,
+                             local=list( parallel = T)) # makes it faster
+# saving the mode
+
+saveRDS(mod4, "./models/mod4.rds")
+
+```
+
+```{r, echo = FALSE, results='asis'}
+# reading in the model 
+
+mod3 <- readRDS("./models/mod3.rds")
+
+mod4 <- readRDS("./models/mod4.rds")
+
+# Extract coefficient summary
+summary_mod3 <- summary(mod3)
+
+# Select coefficients of interest
+selected_coefficients <- c("lag(ANY_EVENT_ACLED)", "SPEI4pg", "L1_SPEI4pg", "L2_SPEI4pg", "GSmain_ext_SPEI4pg", "L1_GSmain_ext_SPEI4pg", "L2_GSmain_ext_SPEI4pg", "W_GSmain_ext_SPEI4pg", "W_L1_GSmain_ext_SPEI4pg", "W_L2_GSmain_ext_SPEI4pg", "W_SPEI4pg", "W_L1_SPEI4pg", "W_L2_SPEI4pg")
+
+# Extract coefficient and AR coefficient tables
+coef_table_3 <- summary_mod3$CoefTable[selected_coefficients, ]
+ar_coef_table_3 <- summary_mod3$ARCoefTable
+
+
+
+# Extract coefficient summary
+summary_mod4 <- summary(mod4)
+
+# Select coefficients of interest
+selected_coefficients <- c("lag(ANY_EVENT_ACLED)", "SPEI4pg", "L1_SPEI4pg", "L2_SPEI4pg", "GSmain_ext_SPEI4pg", "L1_GSmain_ext_SPEI4pg", "L2_GSmain_ext_SPEI4pg", "W_GSmain_ext_SPEI4pg", "W_L1_GSmain_ext_SPEI4pg", "W_L2_GSmain_ext_SPEI4pg", "W_SPEI4pg", "W_L1_SPEI4pg", "W_L2_SPEI4pg")
+
+# Extract coefficient and AR coefficient tables
+coef_table_4 <- summary_mod4$CoefTable[selected_coefficients, ]
+ar_coef_table_4 <- summary_mod4$ARCoefTable
+
+# Print formatted regression table
+stargazer(rbind(ar_coef_table_3, coef_table_3), header = FALSE, align = TRUE, digits = 4, title = " Replication Model 3")
+stargazer(rbind(ar_coef_table_4, coef_table_4), header = FALSE, align = TRUE, out = "html", digits = 4, title = "Replication Model 4")
+
+```
+Next, we create an adjacency matrix based on horizontal contiguity. To that end we write a function which takes the centroids and maximum distance for the contiguity cutoff as inputs and produces a neighboors list for each cells based on horizontal contiguity. We assign a neighboors status based on two conditions. First a cell needs to have the same latitude (or longitude in the case of vertical contiguity) and the centroid of the cell needs to be closer than a pre-specified distance cutoff. We check this condition for all cells. We then rerun specification 3 and 4 based on those contiguity matrices.  
+
+```{r, echo = FALSE}
+### Lets first create teh bianry contiguity matrix based on horizontal contiguity 
+# Extract centroids of the polygons if not already point data
+
+# Calculate distances and filter horizontally contiguous points
+# Define a function to find neighbors based on conditions
+find_neighbors_horizontal <- function(centroids, max_distance = 180000, lat_tolerance = 0.01) {
+  # Create a matrix to store distances
+  distances <- st_distance(centroids)
+  latitudes <- st_coordinates(centroids)[,2] # Extract latitudes
+  
+  # Initialize neighbors list
+  neighbors_list <- vector("list", nrow(centroids))
+  
+  for (i in seq_len(nrow(centroids))) {
+    # Find points within the same latitude band and within distance
+    lat_condition <- abs(latitudes - latitudes[i]) < lat_tolerance
+    dist_condition <- distances[i,] < set_units(max_distance, "meters")
+    
+    # Combine conditions
+    neighbor_ids <- which(lat_condition & dist_condition)
+    
+    # Exclude the point itself from its list of neighbors
+    neighbor_ids <- neighbor_ids[neighbor_ids != i]
+    
+    # Store neighbor ids
+    neighbors_list[[i]] <- as.integer(neighbor_ids)
+  }
+  
+  return(neighbors_list)
+}
+
+find_neighbors_vertical <- function(centroids, max_distance = 180000, lon_tolerance = 0.01) {
+  # Create a matrix to store distances
+  distances <- st_distance(centroids)
+  longitudes <- st_coordinates(centroids)[,1] # Extract longitudes
+  
+  # Initialize neighbors list
+  neighbors_list <- vector("list", nrow(centroids))
+  
+  for (i in seq_len(nrow(centroids))) {
+    # Find points within the same longitude band and within distance
+    lon_condition <- abs(longitudes - longitudes[i]) < lon_tolerance
+    dist_condition <- distances[i,] < set_units(max_distance, "meters")
+    
+    # Combine conditions
+    neighbor_ids <- which(lon_condition & dist_condition)
+    
+    # Exclude the point itself from its list of neighbors
+    neighbor_ids <- neighbor_ids[neighbor_ids != i]
+    
+    # Store neighbor ids
+    neighbors_list[[i]] <- as.integer(neighbor_ids)
+  }
+  
+  return(neighbors_list)
+}
+
+# Apply the function
+neighbors_vertical <- find_neighbors_vertical(geoconflict_main_weights)
+
+neighbors_horizontal <- find_neighbors_horizontal(geoconflict_main_weights)
+
+
+
+# Number of elements
+n <- length(neighbors_vertical)
+
+# Initialize an adjacency matrix with 0s
+adj_matrix_vertical <- matrix(0, nrow = n, ncol = n)
+adj_matrix_horizontal <- matrix(0, nrow = n, ncol = n)
+
+# Populate the adjacency matrix
+for (i in seq_len(n)) {
+  # Ensure indices are within the valid range
+  valid_indices_vertical <- neighbors_vertical[[i]][neighbors_vertical[[i]] <= n]
+  valid_indices_horizontal <- neighbors_horizontal[[i]][neighbors_horizontal[[i]] <= n]
+
+  # Set matrix elements to 1
+  adj_matrix_vertical[i, valid_indices_vertical] <- 1
+  adj_matrix_horizontal[i, valid_indices_horizontal] <- 1
+}
+
+# Turn the matrices into listw objects
+vertical_listw <- mat2listw(adj_matrix_vertical, style = "B", zero.policy=TRUE)
+horizontal_listw <-mat2listw(adj_matrix_horizontal, style = "B", zero.policy=TRUE)
+```
+
+We can now rerun our analysis: 
+```{r, include = FALSE, eval = FALSE}
+modvertical3 <- spml(ANY_EVENT_ACLED ~ lag(ANY_EVENT_ACLED) + SPEI4pg + L1_SPEI4pg + L2_SPEI4pg + GSmain_ext_SPEI4pg + L1_GSmain_ext_SPEI4pg + L2_GSmain_ext_SPEI4pg + W_GSmain_ext_SPEI4pg + W_L1_GSmain_ext_SPEI4pg + W_L2_GSmain_ext_SPEI4pg + W_SPEI4pg + W_L1_SPEI4pg + W_L2_SPEI4pg + elevation_cell + rough_cell + area_cell + as.factor(use_primary) + dis_river_cell + as.factor(shared) +  as.factor(border) + as.factor(any_mineral) + ELF + W_elevation_cell + W_rough_cell + W_area_cell + as.factor(W_border) + W_ELF + as.factor(W_any_mineral) + as.factor(W_shared)  + W_dis_river_cell + as.factor(W_use_primary) + as.factor(country_largest_share):as.numeric(year), # country specific linear time trends
+                             data = as.data.frame(geoconflict_main_if), 
+                             index=c("cell","year"),
+                             listw = vertical_listw,
+                             model="pooling",
+                             effect = "time",  
+                             dynamic = TRUE,
+                             spatial.error="none",
+                             zero.policy = TRUE, 
+                             lag=TRUE,
+                             local=list( parallel = T))
+
+saveRDS(modvertical3, "./models/modvertical3.rds")
+
+modelhorizontal3 <- spml(ANY_EVENT_ACLED ~ lag(ANY_EVENT_ACLED) + SPEI4pg + L1_SPEI4pg + L2_SPEI4pg + GSmain_ext_SPEI4pg + L1_GSmain_ext_SPEI4pg + L2_GSmain_ext_SPEI4pg + W_GSmain_ext_SPEI4pg + W_L1_GSmain_ext_SPEI4pg + W_L2_GSmain_ext_SPEI4pg + W_SPEI4pg + W_L1_SPEI4pg + W_L2_SPEI4pg + elevation_cell + rough_cell + area_cell + as.factor(use_primary) + dis_river_cell + as.factor(shared) +  as.factor(border) + as.factor(any_mineral) + ELF + W_elevation_cell + W_rough_cell + W_area_cell + + as.factor(W_border) + W_ELF + as.factor(W_any_mineral) + as.factor(W_shared)  + W_dis_river_cell + as.factor(W_use_primary) + as.factor(country_largest_share):as.numeric(year), # country specific linear time trends
+                             data = as.data.frame(geoconflict_main_if), 
+                             index=c("cell","year"),
+                             listw = horizontal_listw,
+                             model="pooling",
+                             effect = "time",  
+                             dynamic = TRUE,
+                             spatial.error="none",
+                             zero.policy = TRUE, 
+                             lag=TRUE,
+                             local=list(parallel = T))
+
+saveRDS(modelhorizontal3, "./models/modelhorizontal3.rds")
+
+modelvertical4 <- spml(ANY_EVENT_ACLED ~ lag(ANY_EVENT_ACLED) + SPEI4pg + L1_SPEI4pg + L2_SPEI4pg + GSmain_ext_SPEI4pg + L1_GSmain_ext_SPEI4pg + L2_GSmain_ext_SPEI4pg + W_GSmain_ext_SPEI4pg + W_L1_GSmain_ext_SPEI4pg + W_L2_GSmain_ext_SPEI4pg + W_SPEI4pg + W_L1_SPEI4pg + W_L2_SPEI4pg + elevation_cell + rough_cell + area_cell + as.factor(use_primary) + dis_river_cell + as.factor(shared) + as.factor(W_border)+ as.factor(border) + as.factor(any_mineral) +
+                              ELF + W_elevation_cell + W_rough_cell + W_area_cell + W_ELF + as.factor(W_any_mineral) + as.factor(W_shared)  + 
+                              W_dis_river_cell + as.factor(W_use_primary) + as.factor(country_year_fe), # country x year FE
+                             data = as.data.frame(geoconflict_main_fe), 
+                             index= c("cell","year"),
+                             listw = vertical_listw,
+                             model = "pooling",  # no fixed effects
+                             effect = "individual", 
+                             spatial.error="none",
+                             zero.policy = TRUE, 
+                             dynamic = TRUE,
+                             lag = TRUE, 
+                             Hess = TRUE,
+                             local=list( parallel = T)) # makes it faster
+
+saveRDS(modelvertical4, "./models/modelvertical4.rds")
+
+
+modelhorizontal4 <- spml(ANY_EVENT_ACLED ~ lag(ANY_EVENT_ACLED) + SPEI4pg + L1_SPEI4pg + L2_SPEI4pg + GSmain_ext_SPEI4pg + L1_GSmain_ext_SPEI4pg + L2_GSmain_ext_SPEI4pg + W_GSmain_ext_SPEI4pg + W_L1_GSmain_ext_SPEI4pg + W_L2_GSmain_ext_SPEI4pg + W_SPEI4pg + W_L1_SPEI4pg + W_L2_SPEI4pg + elevation_cell + rough_cell + area_cell + as.factor(use_primary) + dis_river_cell + as.factor(shared) + as.factor(W_border) + as.factor(border) + as.factor(any_mineral) +
+                              ELF + W_elevation_cell + W_rough_cell + W_area_cell + W_ELF + as.factor(W_any_mineral) + as.factor(W_shared)  + 
+                              W_dis_river_cell + as.factor(W_use_primary) + as.factor(country_year_fe), # country x year FE
+                             data = as.data.frame(geoconflict_main_fe), 
+                             index= c("cell","year"),
+                             listw = horizontal_listw,
+                             model = "pooling",  # no fixed effects
+                             effect = "individual", 
+                             spatial.error="none",
+                             zero.policy = TRUE, 
+                             dynamic = TRUE,
+                             lag = TRUE, 
+                             Hess = TRUE,
+                             local=list( parallel = T)) # makes it faster
+
+saveRDS(modelhorizontal4, "./models/modelhorizontal4.rds")
+
+```
+
+
+```{r, echo = FALSE, results = "asis"}
+modelvertical3 <- readRDS("./models/modvertical3.rds")
+
+modelhorizontal3 <- readRDS("./models/modelhorizontal3.rds")
+
+modelvertical4 <- readRDS("./models/modelvertical4.rds")
+
+modelhorizontal4 <- readRDS("./models/modelhorizontal4.rds")
+
+
+# Function to extract coefficient and AR coefficient tables
+extract_tables <- function(model) {
+  summary_model <- summary(model)
+  coef_table <- summary_model$CoefTable[selected_coefficients, ]
+  ar_coef_table <- summary_model$ARCoefTable
+  return(list(coef_table, ar_coef_table))
+}
+
+# Define coefficients of interest
+selected_coefficients <- c("lag(ANY_EVENT_ACLED)", "SPEI4pg", "L1_SPEI4pg", "L2_SPEI4pg", "GSmain_ext_SPEI4pg", "L1_GSmain_ext_SPEI4pg", "L2_GSmain_ext_SPEI4pg", "W_GSmain_ext_SPEI4pg", "W_L1_GSmain_ext_SPEI4pg", "W_L2_GSmain_ext_SPEI4pg", "W_SPEI4pg", "W_L1_SPEI4pg", "W_L2_SPEI4pg")
+
+# Extract tables for modelvertical3
+tables_vertical3 <- extract_tables(modelvertical3)
+coef_table_3_vertical <- tables_vertical3[[1]]
+ar_coef_table_3_vertical <- tables_vertical3[[2]]
+
+# Extract tables for modelhorizontal3
+tables_horizontal3 <- extract_tables(modelhorizontal3)
+coef_table_3_horizontal <- tables_horizontal3[[1]]
+ar_coef_table_3_horizontal <- tables_horizontal3[[2]]
+
+# Extract tables for modelvertical4
+tables_vertical4 <- extract_tables(modelvertical4)
+coef_table_4_vertical <- tables_vertical4[[1]]
+ar_coef_table_4_vertical <- tables_vertical4[[2]]
+
+# Extract tables for modelhorizontal4
+tables_horizontal4 <- extract_tables(modelhorizontal4)
+coef_table_4_horizontal <- tables_horizontal4[[1]]
+ar_coef_table_4_horizontal <- tables_horizontal4[[2]]
+
+stargazer(
+  rbind(ar_coef_table_3_vertical, coef_table_3_vertical), 
+  align = TRUE, 
+  digits = 4, 
+  header = FALSE,
+  title = "Model 3 Vertical"
+)
+
+stargazer(
+  rbind(ar_coef_table_3_horizontal, coef_table_3_horizontal), 
+  align = TRUE, 
+  digits = 4, 
+  header = FALSE,
+  title = "Model 3 Horizontal"
+)
+
+stargazer(
+  rbind(ar_coef_table_4_vertical, coef_table_4_vertical), 
+  align = TRUE, 
+  digits = 4, 
+  header = FALSE,
+  title = "Model 4 Vertical"
+)
+
+stargazer(
+  rbind(ar_coef_table_4_horizontal, coef_table_4_horizontal), 
+  align = TRUE, 
+  digits = 4, 
+  header = FALSE, 
+  title = "Model 4 Horizontal"
+)
+```
+We reproduced both specification 3, and 4 for both contiguity matrices. Now that we have produced a lot of tables, what do we make of that? 
+
+The bottom line is that the results are pretty robust to different specifications of the spatial weights matrix. The main coefficient of interest (the lag of SEPI Growing Season) is statistically significant and of similar magnitude for all regressions. This is reassuring for the validity and robustness of the results. 
+The coefficient for the (spatial) autoregressive parameter $\lambda$ varies somewhat depending on the specification and spatial weights matrix being used. For Model 4 $\lambda$ amounts to 0.0331, while for model 3 with the vertical spatial weights matrix $\lambda$ amounts to about 0.08. Due to the amplification of those effects this implies rather large differences in the amplification of conflict events. Nonetheless overall the results are all remarkably similar.    
+
+## Summarize and visualize the weights matrixes and briefly explain what they imply
+In both the horizontal and the vertical contiguity matrix the average degree is about 1.86 and 2.09. Thus most cells have two neighbors but some cells, when the gird is 'spherically disturbed', can have more than two neighbors.  This is because the condition that any cells is being assigned neighborhood status when the centroid is less than 180 kilometers away can include more than two cells in one direction. 
+
+The networks implied by the vertical and horizontal contiguity matrices are sparser and less dense than the adjacency matrix used by the authors. This is also reflected in lower 'graph density' for the horizontal and vertical contiguity matrix as compared to the baseline adjacency matrix. Visualizing the spatial weight matrices further corroborates the sparser structure. 
+
+More generally, the horizontal/vertical contiguity matrix implies that only cells which share the same latitude/longitude and are directly adjacent are considered to be affecting each other directly. It is hard to make a coherent case for why this should be the case in the real world. There is no inherent reason to assume that effects only propagate in one 'direction'. 
+
+Still due to the nature of dynamic multipliers in the form of the spatial autoregressive terms, even if the network appears relatively sparse and two cells are not directly linked the cells are still connected. However, the restriction of horizontal and vertical contiguity significantly restricts the dynamic propagation of the effects in this context.
+
+```{r, echo = FALSE, eval = FALSE}
+#graph_dist_horizontal <- graph_from_adjacency_matrix(adj_matrix_horizontal, mode = "undirected")
+
+#graph_dist_vertical <- graph_from_adjacency_matrix(adj_matrix_vertical, mode = "undirected")
+
+# Function to summarize graph properties and return as a data frame
+summarize_graph <- function(g) {
+  # Function to format the number based on its value
+  format_number <- function(x) {
+    if (floor(x) == x) {  # If the number is an integer
+      return(as.character(x))  # Return without decimal places
+    } else {
+      return(format(x, nsmall = 2))  # Return with two decimal places
+    }
+  }
+  
+  # Apply the format_number function to each relevant graph property
+  graph_summary <- data.frame(
+    Property = c("Number of vertices", "Number of edges", "Average path length", 
+                 "Graph density", "Average degree", "Max Eigenvector Centrality", 
+                 "Min Eigenvector Centrality", "Average Eigenvector Centrality", 
+                 "Most Central Unit (Vertex ID)"),
+    Value = sapply(c(vcount(g), ecount(g), 
+              average.path.length(g, directed = FALSE), 
+              edge_density(g), 
+              mean(degree(g)),
+              max(eigen_centrality(g)$vector),
+              min(eigen_centrality(g)$vector),
+              mean(eigen_centrality(g)$vector),
+              as.numeric(V(g)[which.max(eigen_centrality(g)$vector)])), format_number)
+  )
+  
+  return(graph_summary)
+}
+
+
+#summarize_graph(graph_dist_horizontal)
+#summarize_graph(graph_dist_vertical)
+
+
+#raster::image((adj_matrix_vertical), main="Smooth Distance-Decay Spatial Weights Matrix")
+#plot((adj_matrix_horizontal), main="Smooth Distance-Decay Spatial Weights Matrix")
+# Plot adjacency matrix
+#image(adj_matrix_vertical, col = c("white", "black"), main = "Adjacency Matrix")
+
+```
+
+## Visualization of Spillover Effects
+
+In a similar spirit to @Harari2018 we simulate the effect of a \textit{one-time} and \textit{one-standard deviation SEPI growing season shock} setting all other covariates to zero (and holding everything else constant). We multiply the shock times -1 to obtain the negative impact and thus the \textit{increase} in conflict incidence. We exogenously shock a cell and calculate 'manually', based on the coefficients of model 4 (instead of model 3 as in the paper), the magnitude of the shock propagation for t = 0, 1, and 2 for all neighbors and 'neighbors neighbors'. We take into account both the dynamic, and spatial autoregressive structure of the model. We see that the shock reaches its peak effect size at t = 1, consistent with the main insight of the paper (the lagged effect of growing season shocks on conflict). A negative one standard deviation growing season shock increases conflict incidence by about 2.1 percentage points for the affected cell. Overall the spillover effects both in absolute magnitude and visually as reflected in the figure are rather small. The maximum conflict increase in a neighboring cell only amounts to about 0.5 percentage points. 
+
+```{r, echo = FALSE}
+#first number denotes period second number denotes neighboor
+# shock in period 0 of standard deviation in growing season SEPI (without contemporanously affecting SEPI over the year)
+risk_cell_0_0 <- -1*mod4$coefficients["GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg) / (1 - sum(listw2mat(listwmat))*mod4$arcoef)
+
+risk_cell_0_1 <- -1*mod4$coefficients["W_GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg) + risk_cell_0_0*mod4$arcoef 
+
+risk_cell_0_2 <- -1*mod4$coefficients["W_GSmain_ext_SPEI4pg"]*mod4$coefficients["W_GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg) + mod4$arcoef*risk_cell_0_1 + mod4$arcoef*mod4$arcoef*risk_cell_0_0
+
+
+risk_cell_1_0 <- (risk_cell_0_0*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + -1*mod4$coefficients["L1_GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg)) / (1-mod4$arcoef)
+
+risk_cell_1_1 <- risk_cell_0_1*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + -1*mod4$coefficients["W_L1_GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg) + risk_cell_1_0*mod4$arcoef 
+
+risk_cell_1_2 <- risk_cell_0_2*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + -1*mod4$coefficients["W_L1_GSmain_ext_SPEI4pg"]*mod4$coefficients["W_L1_GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg) + mod4$arcoef*risk_cell_1_1 + mod4$arcoef*mod4$arcoef*risk_cell_1_0
+
+
+risk_cell_2_0 <- (risk_cell_1_0*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + risk_cell_0_0 * mod4$coefficients["lag(ANY_EVENT_ACLED)"] *mod4$coefficients["lag(ANY_EVENT_ACLED)"]  + -1*mod4$coefficients["L2_GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg)) / (1-mod4$arcoef)
+
+risk_cell_2_1 <- risk_cell_1_1*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + risk_cell_0_1 * mod4$coefficients["lag(ANY_EVENT_ACLED)"] *mod4$coefficients["lag(ANY_EVENT_ACLED)"]  + -1*mod4$coefficients["W_L2_GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg) + risk_cell_2_0*mod4$arcoef 
+
+risk_cell_2_2 <- -1*mod4$coefficients["W_L2_GSmain_ext_SPEI4pg"]*mod4$coefficients["W_L2_GSmain_ext_SPEI4pg"]*sd(geoconflict_main_weights$GSmain_ext_SPEI4pg) + mod4$arcoef*risk_cell_2_1 +  mod4$arcoef*mod4$arcoef*risk_cell_2_0 + risk_cell_2_1*mod4$arcoef +risk_cell_2_0*mod4$arcoef*mod4$arcoef
+
+
+# we do not use those effects
+
+risk_cell_3_0 <- risk_cell_2_0*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + risk_cell_1_0*mod4$coefficients["lag(ANY_EVENT_ACLED)"]*mod4$coefficients["lag(ANY_EVENT_ACLED)"]  +   risk_cell_0_0*mod4$coefficients["lag(ANY_EVENT_ACLED)"] *mod4$coefficients["lag(ANY_EVENT_ACLED)"]*mod4$coefficients["lag(ANY_EVENT_ACLED)"]
+
+risk_cell_3_1 <- risk_cell_1_1*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + risk_cell_0_1 * mod4$coefficients["lag(ANY_EVENT_ACLED)"] *mod4$coefficients["lag(ANY_EVENT_ACLED)"] + mod4$coefficients["lag(ANY_EVENT_ACLED)"] *mod4$coefficients["lag(ANY_EVENT_ACLED)"] *risk_cell_2_1 + risk_cell_3_0*mod4$arcoef  
+
+risk_cell_3_2 <- mod4$arcoef*risk_cell_3_1 + risk_cell_2_2*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + risk_cell_1_2 * mod4$coefficients["lag(ANY_EVENT_ACLED)"] *mod4$coefficients["lag(ANY_EVENT_ACLED)"] + risk_cell_0_2*mod4$coefficients["lag(ANY_EVENT_ACLED)"] *mod4$coefficients["lag(ANY_EVENT_ACLED)"]*mod4$coefficients["lag(ANY_EVENT_ACLED)"] + mod4$arcoef*mod4$arcoef*risk_cell_3_1 + risk_cell_3_0*mod4$arcoef*mod4$arcoef
+```
+
+```{r, echo = FALSE}
+grid1 <- matrix(NA, nrow = 5, ncol = 5)
+grid2 <- matrix(NA, nrow = 5, ncol = 5)
+grid3 <- matrix(NA, nrow = 5, ncol = 5)
+
+
+# Fill the outer cells with risk_cell_0_2
+grid1[, c(1, 5)] <- risk_cell_0_2
+grid1[c(1, 5), ] <- risk_cell_0_2
+
+# Fill the inner cells with risk_cell_0_1
+grid1[-c(1, 5), -c(1, 5)] <- risk_cell_0_1
+
+# Fill the central cell with risk_cell_0_0
+grid1[3, 3] <- risk_cell_0_0
+
+# Convert the data to a data frame
+df <- expand.grid(x = 1:5, y = 1:5)
+df$z <-  as.vector(grid1)   # Replace with your own values
+
+
+
+# Fill the outer cells with risk_cell_0_2
+grid2[, c(1, 5)] <- risk_cell_1_2
+grid2[c(1, 5), ] <- risk_cell_1_2
+
+# Fill the inner cells with risk_cell_0_1
+grid2[-c(1, 5), -c(1, 5)] <- risk_cell_1_1
+
+# Fill the central cell with risk_cell_0_0
+grid2[3, 3] <- risk_cell_1_0
+
+# Convert the data to a data frame
+df <- expand.grid(x = 1:5, y = 1:5)
+df$z <- as.vector(grid2)   # Replace with your own values
+
+
+# Fill the outer cells with risk_cell_0_2
+grid3[, c(1, 5)] <- risk_cell_2_2
+grid3[c(1, 5), ] <- risk_cell_2_2
+
+# Fill the inner cells with risk_cell_0_1
+grid3[-c(1, 5), -c(1, 5)] <- risk_cell_2_1
+
+# Fill the central cell with risk_cell_0_0
+grid3[3, 3] <- risk_cell_2_0
+
+# Convert the data to a data frame
+df <- expand.grid(x = 1:5, y = 1:5)
+df$z <- as.vector(grid3)   # Replace with your own values
+```
+
+```{r, figure.height = 3, figure.width = 2, echo = FALSE}
+# Combine all three grids into one list
+all_grids <- list(grid1, grid2, grid3)
+
+# Calculate the overall range of values across all grids
+overall_range <- range(unlist(all_grids))
+
+# Convert data for each grid to data frames
+df1 <- expand.grid(x = 1:5, y = 1:5)
+df1$Prob <- as.vector(grid1)
+
+df2 <- expand.grid(x = 1:5, y = 1:5)
+df2$Prob <- as.vector(grid2)
+
+df3 <- expand.grid(x = 1:5, y = 1:5)
+df3$Prob <- as.vector(grid3)
+
+# Create plots
+plot1 <- ggplot(df1, aes(x = x, y = y, fill = Prob)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "magma", limits = overall_range) +
+  theme_void() +
+  theme(legend.position = "none") +
+  labs(title = "SEPI Growing Season Shock at t = 0")
+
+plot2 <- ggplot(df2, aes(x = x, y = y, fill = Prob)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "magma", limits = overall_range) +
+  theme_void() +
+  theme(legend.position = "none") +
+  labs(title = "t = 1")
+
+plot3 <- ggplot(df3, aes(x = x, y = y, fill = Prob)) +
+  geom_tile() +
+  scale_fill_viridis_c(option = "magma", limits = overall_range) +
+  theme_void() +
+  labs(title = "t = 2", fill = "Pr(Conflict)")
+
+# Arrange plots with equal size
+combined_plots <- plot1 + plot2 + plot3 + plot_layout(ncol = 1, width = 0.5, guides='collect')
+
+# Display the combined plots
+combined_plots
+```
+
+## Appendix
+Functions to create horizontal and vertical contiguity neighboors list
+```{r}
+### Lets first create teh bianry contiguity matrix based on horizontal contiguity 
+# Extract centroids of the polygons if not already point data
+
+# Calculate distances and filter horizontally contiguous points
+# Define a function to find neighbors based on conditions
+find_neighbors_horizontal <- function(centroids, max_distance = 150000, lat_tolerance = 0.01) {
+  # Create a matrix to store distances
+  distances <- st_distance(centroids)
+  latitudes <- st_coordinates(centroids)[,2] # Extract latitudes
+  
+  # Initialize neighbors list
+  neighbors_list <- vector("list", nrow(centroids))
+  
+  for (i in seq_len(nrow(centroids))) {
+    # Find points within the same latitude band and within distance
+    lat_condition <- abs(latitudes - latitudes[i]) < lat_tolerance
+    dist_condition <- distances[i,] < set_units(max_distance, "meters")
+    
+    # Combine conditions
+    neighbor_ids <- which(lat_condition & dist_condition)
+    
+    # Exclude the point itself from its list of neighbors
+    neighbor_ids <- neighbor_ids[neighbor_ids != i]
+    
+    # Store neighbor ids
+    neighbors_list[[i]] <- as.integer(neighbor_ids)
+  }
+  
+  return(neighbors_list)
+}
+
+find_neighbors_vertical <- function(centroids, max_distance = 150000, lon_tolerance = 0.01) {
+  # Create a matrix to store distances
+  distances <- st_distance(centroids)
+  longitudes <- st_coordinates(centroids)[,1] # Extract longitudes
+  
+  # Initialize neighbors list
+  neighbors_list <- vector("list", nrow(centroids))
+  
+  for (i in seq_len(nrow(centroids))) {
+    # Find points within the same longitude band and within distance
+    lon_condition <- abs(longitudes - longitudes[i]) < lon_tolerance
+    dist_condition <- distances[i,] < set_units(max_distance, "meters")
+    
+    # Combine conditions
+    neighbor_ids <- which(lon_condition & dist_condition)
+    
+    # Exclude the point itself from its list of neighbors
+    neighbor_ids <- neighbor_ids[neighbor_ids != i]
+    
+    # Store neighbor ids
+    neighbors_list[[i]] <- as.integer(neighbor_ids)
+  }
+  
+  return(neighbors_list)
+}
+
+# Apply the function
+neighbors_vertical <- find_neighbors_vertical(geoconflict_main_weights)
+
+neighbors_horizontal <- find_neighbors_horizontal(geoconflict_main_weights)
+
+
+
+# Number of elements
+n <- length(neighbors_vertical)
+
+# Initialize an adjacency matrix with 0s
+adj_matrix_vertical <- matrix(0, nrow = n, ncol = n)
+adj_matrix_horizontal <- matrix(0, nrow = n, ncol = n)
+
+# Populate the adjacency matrix
+for (i in seq_len(n)) {
+  # Ensure indices are within the valid range
+  valid_indices_vertical <- neighbors_vertical[[i]][neighbors_vertical[[i]] <= n]
+  valid_indices_horizontal <- neighbors_horizontal[[i]][neighbors_horizontal[[i]] <= n]
+
+  # Set matrix elements to 1
+  adj_matrix_vertical[i, valid_indices_vertical] <- 1
+  adj_matrix_horizontal[i, valid_indices_horizontal] <- 1
+}
+
+# Turn the matrices into listw objects
+vertical_listw <- mat2listw(adj_matrix_vertical, style = "B", zero.policy=TRUE)
+horizontal_listw <-mat2listw(adj_matrix_horizontal, style = "B", zero.policy=TRUE)
+```
+
+\newpage
+
+\textbf{Bibliography}
